@@ -121,7 +121,7 @@ The model hears many English words in Thai speech but spells them by ear ("จ�
 "เอ็นเดีย"). Two things help, both in Thai + English mode:
 
 - **Hotwords.** Words in the user's vocabulary file (menu → My vocabulary…; created from
-  [assets/vocabulary.txt](assets/vocabulary.txt), ~140 tech terms) are favoured while
+  [assets/vocabulary.txt](assets/vocabulary.txt), ~340 tech terms and words Thai developers say in English) are favoured while
   decoding: beam search (4 hypotheses, batched into one decoder call per step, up to 3 pieces
   per 80 ms frame) over a character trie of the terms, so any way the model splits a word into
   pieces matches, with a bonus per matching piece that is taken back if the match fails.

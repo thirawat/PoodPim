@@ -6,7 +6,7 @@
 # - ใช้กับโหมด Thai + English เท่านั้น
 # - ไม่ควรใส่คำสั้นที่เสียงพ้องกับคำไทย (เช่น LINE ที่เสียงคล้าย "ไลน์")
 #   แอปอาจใส่คำนั้นในที่ที่คุณไม่ได้พูด
-# - ไม่จำเป็นต้องยาวมาก ทดสอบแล้วได้ผลดีที่ราว 150 คำ
+# - ทดสอบแล้วได้ผลดีที่ราว 150-350 คำ
 # - ลบทุกคำออก = ถอดเสียงแบบเดิม (ไม่ใช้รายการคำ)
 #
 # My vocabulary: English words PoodPim should write in Latin letters, one per line.
@@ -156,3 +156,207 @@ Silicon Valley
 MIT
 Stanford
 Harvard
+
+# Words Thai developers say in English (and usually write in English)
+dev
+dev team
+structure
+data structure
+architecture
+infrastructure
+infra
+maintain
+operation
+tool
+skill
+SRE
+SLA
+SLO
+SLI
+Stack Overflow
+sysadmin
+on-call
+microservice
+monolith
+design pattern
+refactor
+code
+coding
+code review
+source code
+bug
+debug
+fix
+hotfix
+patch
+feature
+requirement
+spec
+scope
+estimate
+deadline
+sprint
+backlog
+scrum
+agile
+kanban
+standup
+retro
+ticket
+task
+issue
+milestone
+roadmap
+release
+version
+rollback
+merge
+branch
+commit
+push
+pull request
+rebase
+conflict
+repository
+Git
+CI/CD
+pipeline
+build
+compile
+runtime
+environment
+staging
+dev environment
+config
+configuration
+deployment
+container
+cluster
+node
+instance
+load balancer
+auto scale
+latency
+throughput
+performance
+bottleneck
+memory
+storage
+backup
+restore
+downtime
+uptime
+incident
+monitoring
+alert
+log
+logging
+dashboard
+metric
+query
+schema
+table
+index
+cache
+queue
+stream
+batch
+endpoint
+request
+response
+payload
+REST
+GraphQL
+JSON
+webhook
+callback
+async
+thread
+process
+processing
+function
+method
+object
+interface
+module
+library
+package
+dependency
+plugin
+CLI
+script
+syntax
+variable
+parameter
+array
+string
+integer
+boolean
+null
+exception
+error
+crash
+timeout
+retry
+validation
+authentication
+authorization
+login
+password
+permission
+role
+admin
+user
+session
+encryption
+security
+vulnerability
+firewall
+VPN
+network
+domain
+DNS
+SSL
+HTTP
+HTTPS
+localhost
+port
+IP
+full stack
+mobile
+responsive
+UI
+UX
+wireframe
+mockup
+prototype
+user story
+use case
+flow
+workflow
+automation
+integration
+migration
+legacy
+tech debt
+testing
+unit test
+integration test
+test case
+QA
+UAT
+go live
+launch
+MVP
+POC
+product owner
+project manager
+stakeholder
+tech lead
+senior
+junior
+intern
+outsource
+freelance
+remote
+onboarding

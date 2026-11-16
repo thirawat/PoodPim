@@ -9,7 +9,7 @@
 //! output. Acronyms the model spells in Thai are mapped back afterwards
 //! (`thai_acronyms_to_latin`).
 
-/// The vocabulary new users start with (assets/vocabulary.txt): ~140 tech terms.
+/// The vocabulary new users start with (assets/vocabulary.txt): ~340 tech terms and words Thai developers say in English.
 pub const DEFAULT_LIST: &str = include_str!("../assets/vocabulary.txt");
 
 /// The user's vocabulary file (created from `DEFAULT_LIST` the first time).
