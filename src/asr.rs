@@ -95,12 +95,15 @@ impl OpenThaiAsr {
             .map(str::to_owned)
             .collect();
         let blank = tokens.len();
-        // Measured on tools/asr-eval (fast Thai/English tech speech): beam 4, a 1.5 bonus per
-        // hotword piece and an emission bias of -0.5 gave the lowest CER with the most English
-        // words right. The variables are for re-tuning, not for users.
+        // Tuned on two sets: tools/asr-eval (fast Thai/English tech podcast) and ten dev
+        // sentences in a user's own voice. Beam 6 with a 2.0 bonus per hotword piece found the
+        // most English terms in that voice (50% vs 39% with beam 4 / 1.5) with fewer wrong
+        // Latin words, and more on the podcast (63% vs 59%) at the same CER; beams of 8-12 or
+        // bigger bonuses found a few more words but put in more wrong ones. Decoding takes
+        // about 1.8x as long as with beam 4. The variables are for re-tuning, not for users.
         let envf = |k: &str, d: f32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
-        let beam = env_n("POODPIM_BEAM", 4);
-        let bonus = envf("POODPIM_BONUS", 1.5);
+        let beam = env_n("POODPIM_BEAM", 6);
+        let bonus = envf("POODPIM_BONUS", 2.0);
         let beam_blank_bias = envf("POODPIM_BEAM_BLANK_BIAS", -0.5);
         let mut asr = Self { _env: env, encoder, decoder, tokens, blank, beam, bonus, beam_blank_bias };
         // ONNX Runtime is slow on its first runs (allocations, kernel set-up); warm it up

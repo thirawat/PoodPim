@@ -62,3 +62,9 @@
 CICD = CI/CD
 dead line = deadline
 Roll Back = rollback
+เหมิด, เหมือด = merge
+ภูล request, ภูลรีเควสต์, พูลรีเควสต์, พูล request = pull request
+ชัด GPT, แชท GPT, แชต GPT, แชทจีพีที = ChatGPT
+ดาดาเบส = database
+ทำเอาท์ = timeout
+Unittest = unit test
