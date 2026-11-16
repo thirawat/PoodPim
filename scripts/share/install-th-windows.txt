@@ -82,7 +82,7 @@ PoodPim จะเปิดเองทุกครั้งที่เปิด
 • PoodPim เช็คเวอร์ชันใหม่วันละครั้ง และจะถามก่อนอัปเดตเสมอ
   เช็คเองได้ที่ไอคอนไมโครโฟน › Check for updates…
 • ถอนการติดตั้ง: ไอคอนไมโครโฟน › Uninstall PoodPim…
-  หรือ Settings › Apps › PoodPim › Uninstall (ถ้าติดตั้งด้วยคำสั่ง PowerShell)
+  หรือ Settings › Apps › PoodPim › Uninstall
 
 
 ความเป็นส่วนตัว

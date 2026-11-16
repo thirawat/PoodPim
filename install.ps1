@@ -9,9 +9,9 @@
 # It downloads the release zip from GitHub, checks its SHA-256, puts PoodPim in
 # %LOCALAPPDATA%\Programs\PoodPim, adds a Start menu shortcut and an entry in
 # Settings > Apps (to uninstall), quits a running copy and starts the new one.
-# PoodPim.exe carries this script and runs it to update itself (POODPIM_APP = the folder
-# to replace). The release exe is not code-signed, so unlike install.sh this can only check
-# that the download is intact, not who built it. Uninstall: uninstall.ps1.
+# The app updates and uninstalls itself (PoodPim.exe --uninstall, also run by Settings > Apps);
+# POODPIM_APP picks another folder to install into. The release exe is not code-signed, so
+# unlike install.sh this can only check that the download is intact, not who built it.
 # Messages are in English: Windows PowerShell 5.1 misreads UTF-8 files without a BOM.
 
 $ErrorActionPreference = 'Stop'
@@ -63,7 +63,6 @@ try {
     Expand-Archive -Path "$Tmp\$Zip" -DestinationPath $Stage -Force
     $New = Join-Path $Stage 'PoodPim'
     if (-not (Test-Path (Join-Path $New 'PoodPim.exe'))) { Fail 'PoodPim.exe is missing from the zip' }
-    Get-ChildItem -Recurse $New | Unblock-File
 
     # Quit the running copy (it may be the one that started this update) and wait for it.
     $running = @(Get-Process PoodPim -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $Exe })
@@ -103,7 +102,7 @@ try {
         DisplayIcon     = $(if (Test-Path (Join-Path $Dir 'PoodPim.ico')) { Join-Path $Dir 'PoodPim.ico' } else { $Exe })
         InstallLocation = $Dir
         URLInfoAbout    = "https://github.com/$Repo"
-        UninstallString = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$Dir\uninstall.ps1`""
+        UninstallString = "`"$Exe`" --uninstall"
     }
     foreach ($k in $Values.Keys) { Set-ItemProperty -Path $Key -Name $k -Value $Values[$k] }
     foreach ($k in 'NoModify', 'NoRepair') { Set-ItemProperty -Path $Key -Name $k -Value 1 -Type DWord }

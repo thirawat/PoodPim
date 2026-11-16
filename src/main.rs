@@ -76,6 +76,9 @@ fn main() -> Result<()> {
             show_config(&Config::load());
             Ok(())
         }
+        // Settings > Apps > PoodPim > Uninstall (the registry entry points here).
+        #[cfg(windows)]
+        Some("--uninstall") => uninstall(),
         Some("-h" | "--help" | "help") => {
             println!("{USAGE}");
             Ok(())
@@ -181,6 +184,26 @@ fn transcribe(args: &[String]) -> Result<()> {
         for e in &out.errors {
             eprintln!("segment error: {e}");
         }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn uninstall() -> Result<()> {
+    use poodpim::{platform, update};
+    if !platform::confirm("ลบ PoodPim ออกจากเครื่องนี้?\n\nจะลบโปรแกรม การตั้งค่า และการเปิดเองตอนเปิดเครื่อง", "OK", "Cancel") {
+        return Ok(());
+    }
+    let delete_model = model::is_ready(&model::model_dir())
+        && platform::confirm(
+            "ลบโมเดลถอดเสียง (2.4 GB) ด้วยไหม?\n\nกด OK = ลบ, Cancel = เก็บไว้ (ติดตั้งใหม่ภายหลังจะไม่ต้องดาวน์โหลดซ้ำ)",
+            "OK",
+            "Cancel",
+        );
+    platform::stop_other_copies();
+    match update::uninstall(delete_model) {
+        Ok(()) => platform::alert("ลบ PoodPim ออกจากเครื่องแล้ว"),
+        Err(e) => platform::alert(&format!("ถอนการติดตั้งไม่สำเร็จทั้งหมด: {e:#}")),
     }
     Ok(())
 }

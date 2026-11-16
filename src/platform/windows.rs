@@ -138,7 +138,7 @@ pub fn open_permission_settings() {}
 
 /// Asks for the API key. None if cancelled or left empty.
 pub fn ask_api_key(message: &str) -> Option<String> {
-    input_box(message, "")
+    input_box(message, "", true)
 }
 
 /// Where the app's log goes (a GUI app on Windows has no console to print to).
@@ -182,28 +182,224 @@ pub fn confirm(message: &str, _ok: &str, _cancel: &str) -> bool {
 
 /// Asks for the server URL and API key. None if cancelled. An empty key keeps `current_key`.
 pub fn ask_server_settings(current_url: &str, current_key: &str) -> Option<(String, String)> {
-    let url = input_box(super::URL_PROMPT, current_url)?;
+    let url = input_box(super::URL_PROMPT, current_url, false)?;
     let hint = if current_key.is_empty() { super::KEY_PROMPT } else { super::KEY_KEEP_PROMPT };
-    let key = input_box(hint, "").unwrap_or_else(|| current_key.to_string());
+    let key = input_box(hint, "", true).unwrap_or_else(|| current_key.to_string());
     Some((url, key))
 }
 
-/// A one-line text prompt (the .NET InputBox, via PowerShell, which every Windows has).
-/// The texts go in through environment variables so nothing is parsed as PowerShell.
-/// None if cancelled or left empty.
-fn input_box(message: &str, default: &str) -> Option<String> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let script = "Add-Type -AssemblyName Microsoft.VisualBasic; \
-        [Console]::OutputEncoding = [Text.Encoding]::UTF8; \
-        [Microsoft.VisualBasic.Interaction]::InputBox($env:POODPIM_MESSAGE, 'PoodPim', $env:POODPIM_DEFAULT)";
-    let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script])
-        .env("POODPIM_MESSAGE", message)
-        .env("POODPIM_DEFAULT", default)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
+/// Sets a string value under HKEY_CURRENT_USER\\`key` (creating the key).
+pub fn registry_set(key: &str, name: &str, value: &str) -> anyhow::Result<()> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegSetKeyValueW};
+    use windows::core::HSTRING;
+    let data: Vec<u16> = value.encode_utf16().chain([0]).collect();
+    let r = unsafe {
+        RegSetKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(key), &HSTRING::from(name), REG_SZ.0, Some(data.as_ptr().cast()), (data.len() * 2) as u32)
+    };
+    if r == ERROR_SUCCESS { Ok(()) } else { Err(anyhow::anyhow!("registry: {r:?}")) }
+}
+
+/// Deletes HKEY_CURRENT_USER\\`key` and everything under it (nothing if it isn't there).
+pub fn registry_delete_tree(key: &str) {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RegDeleteTreeW};
+    use windows::core::HSTRING;
+    unsafe {
+        let _ = RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(key));
+    }
+}
+
+/// Ends other running copies of this exe (uninstalling from Settings > Apps while the tray
+/// app runs). Returns how many were stopped.
+pub fn stop_other_copies() -> usize {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+    };
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+        QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
+    };
+    use windows::core::PWSTR;
+    let Ok(me) = std::env::current_exe() else { return 0 };
+    let my_pid = std::process::id();
+    let mut stopped = 0;
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return 0 };
+        let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut ok = Process32FirstW(snap, &mut entry).is_ok();
+        while ok {
+            let pid = entry.th32ProcessID;
+            if pid != my_pid
+                && let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, pid)
+            {
+                    let mut buf = [0u16; 1024];
+                    let mut len = buf.len() as u32;
+                    if QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok() {
+                        let path = std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len as usize]));
+                        if path == me && TerminateProcess(h, 0).is_ok() {
+                            WaitForSingleObject(h, 5000);
+                            stopped += 1;
+                        }
+                    }
+                    let _ = CloseHandle(h);
+            }
+            ok = Process32NextW(snap, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snap);
+    }
+    stopped
+}
+
+/// A one-line text prompt, drawn with Win32 controls (it used to be the .NET InputBox via a
+/// hidden PowerShell, which antivirus software treats as suspicious). `hidden` masks what is
+/// typed. Runs its own message loop, so call it off the event-loop thread. None if cancelled
+/// or left empty.
+fn input_box(message: &str, default: &str, hidden: bool) -> Option<String> {
+    use std::cell::RefCell;
+
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Graphics::Gdi::{
+        CLEARTYPE_QUALITY, CreateFontIndirectW, DEFAULT_CHARSET, DeleteObject, GetMonitorInfoW, HGDIOBJ, LOGFONTW,
+        MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
+    };
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::HiDpi::GetDpiForSystem;
+    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+        ES_AUTOHSCROLL, ES_PASSWORD, GetMessageW, GetWindowTextLengthW, GetWindowTextW, HMENU, IDCANCEL, IDOK,
+        IsDialogMessageW, MSG, PostQuitMessage, RegisterClassExW, SendMessageW, SetForegroundWindow, ShowWindow,
+        SW_SHOW, TranslateMessage, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_SETFONT, WNDCLASSEXW, WINDOW_EX_STYLE,
+        WINDOW_STYLE, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_DLGMODALFRAME, WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU,
+        WS_TABSTOP, WS_VISIBLE,
+    };
+    use windows::core::{HSTRING, w};
+
+    struct State {
+        edit: HWND,
+        answer: Option<String>,
+    }
+    thread_local! {
+        static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+    }
+
+    unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        match msg {
+            WM_COMMAND => {
+                let id = (wparam.0 & 0xFFFF) as i32;
+                if id == IDOK.0 {
+                    STATE.with(|s| {
+                        if let Some(st) = s.borrow_mut().as_mut() {
+                            let len = unsafe { GetWindowTextLengthW(st.edit) }.max(0) as usize;
+                            let mut buf = vec![0u16; len + 1];
+                            let n = unsafe { GetWindowTextW(st.edit, &mut buf) }.max(0) as usize;
+                            st.answer = Some(String::from_utf16_lossy(&buf[..n]));
+                        }
+                    });
+                    let _ = unsafe { DestroyWindow(hwnd) };
+                } else if id == IDCANCEL.0 {
+                    let _ = unsafe { DestroyWindow(hwnd) };
+                }
+                LRESULT(0)
+            }
+            WM_CLOSE => {
+                let _ = unsafe { DestroyWindow(hwnd) };
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                unsafe { PostQuitMessage(0) };
+                LRESULT(0)
+            }
+            _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+        }
+    }
+
+    unsafe {
+        let instance = GetModuleHandleW(None).ok()?;
+        let class = w!("PoodPimInput");
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(proc),
+            hInstance: instance.into(),
+            lpszClassName: class,
+            // COLOR_BTNFACE + 1: the usual dialog background.
+            hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH((15 + 1) as isize as *mut _),
+            ..Default::default()
+        };
+        RegisterClassExW(&wc); // fails harmlessly if already registered
+        let scale = GetDpiForSystem().max(96) as f32 / 96.0;
+        let px = |v: f32| (v * scale).round() as i32;
+        let (w, h) = (px(460.0), px(196.0));
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let monitor = MonitorFromPoint(Default::default(), MONITOR_DEFAULTTOPRIMARY);
+        let (x, y) = if GetMonitorInfoW(monitor, &mut info).as_bool() {
+            let r = info.rcWork;
+            (r.left + (r.right - r.left - w) / 2, r.top + (r.bottom - r.top - h) / 3)
+        } else {
+            (200, 200)
+        };
+        let dlg = CreateWindowExW(
+            WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
+            class,
+            w!("PoodPim"),
+            WS_POPUP | WS_CAPTION | WS_SYSMENU,
+            x,
+            y,
+            w,
+            h,
+            None,
+            None,
+            Some(instance.into()),
+            None,
+        )
         .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!text.is_empty()).then_some(text)
+        let mut lf = LOGFONTW { lfHeight: -px(15.0), lfCharSet: DEFAULT_CHARSET, lfQuality: CLEARTYPE_QUALITY, ..Default::default() };
+        for (i, c) in "Leelawadee UI".encode_utf16().enumerate() {
+            lf.lfFaceName[i] = c;
+        }
+        let font = CreateFontIndirectW(&lf);
+        let child = |class: windows::core::PCWSTR, text: &HSTRING, style: u32, ex: WINDOW_EX_STYLE, id: i32, rect: (f32, f32, f32, f32)| {
+            let hwnd = CreateWindowExW(
+                ex,
+                class,
+                text,
+                WS_CHILD | WS_VISIBLE | WINDOW_STYLE(style),
+                px(rect.0),
+                px(rect.1),
+                px(rect.2),
+                px(rect.3),
+                Some(dlg),
+                Some(HMENU(id as isize as *mut _)),
+                Some(instance.into()),
+                None,
+            )
+            .ok();
+            if let Some(c) = hwnd {
+                SendMessageW(c, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
+            }
+            hwnd
+        };
+        child(w!("STATIC"), &HSTRING::from(message), 0, WINDOW_EX_STYLE(0), 0, (16.0, 12.0, 412.0, 52.0));
+        let edit_style = WS_TABSTOP.0 | WS_BORDER.0 | ES_AUTOHSCROLL as u32 | if hidden { ES_PASSWORD as u32 } else { 0 };
+        let edit = child(w!("EDIT"), &HSTRING::from(default), edit_style, WINDOW_EX_STYLE(0), 100, (16.0, 70.0, 412.0, 28.0))?;
+        child(w!("BUTTON"), &HSTRING::from("OK"), WS_TABSTOP.0 | BS_DEFPUSHBUTTON as u32, WINDOW_EX_STYLE(0), IDOK.0, (236.0, 112.0, 92.0, 30.0));
+        child(w!("BUTTON"), &HSTRING::from("ยกเลิก"), WS_TABSTOP.0 | BS_PUSHBUTTON as u32, WINDOW_EX_STYLE(0), IDCANCEL.0, (336.0, 112.0, 92.0, 30.0));
+        STATE.with(|s| *s.borrow_mut() = Some(State { edit, answer: None }));
+
+        let _ = ShowWindow(dlg, SW_SHOW);
+        let _ = SetForegroundWindow(dlg);
+        let _ = SetFocus(Some(edit));
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            // Tab between controls, Enter = OK, Esc = Cancel.
+            if !IsDialogMessageW(dlg, &msg).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        let _ = DeleteObject(HGDIOBJ(font.0));
+        let answer = STATE.with(|s| s.borrow_mut().take()).and_then(|st| st.answer);
+        answer.map(|a| a.trim().to_string()).filter(|a| !a.is_empty())
+    }
 }
