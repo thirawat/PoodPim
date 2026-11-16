@@ -74,7 +74,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-say "กำลังดาวน์โหลด PoodPim $VERSION…"
+say "กำลังดาวน์โหลด PoodPim ${VERSION}…"
 curl -fL --progress-bar -o "$TMP/$ZIP" "$URL/$ZIP" || fail "ดาวน์โหลด $ZIP ไม่ได้"
 curl -fsSL -o "$TMP/$ZIP.sha256" "$URL/$ZIP.sha256" || fail "ดาวน์โหลด checksum ไม่ได้"
 (cd "$TMP" && shasum -a 256 -c "$ZIP.sha256" >/dev/null) || fail "ไฟล์ที่ดาวน์โหลดเสียหาย (checksum ไม่ตรง)"
