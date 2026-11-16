@@ -308,6 +308,6 @@ impl OpenThaiAsr {
         // single code point U+0E33 (ำ) so search and spell-check work on the result.
         let text = text.replace('\u{2581}', " ").replace("\u{0E4D}\u{0E32}", "\u{0E33}");
         let text = crate::hotwords::thai_acronyms_to_latin(&text);
-        vocabulary.canonical_case(&text).trim().to_string()
+        vocabulary.canonical_case(&vocabulary.fix_doubled_letters(&text)).trim().to_string()
     }
 }

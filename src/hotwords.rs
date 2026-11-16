@@ -155,6 +155,39 @@ impl Hotwords {
         s.pending
     }
 
+    /// Acronyms the model wrote with a letter doubled ("MVPP", "GPUU", "CCPU": it spells them
+    /// letter by letter and sometimes says one twice) become the known one, if dropping one of
+    /// the doubled letters gives an acronym from the list or from `ACRONYMS`.
+    pub fn fix_doubled_letters(&self, text: &str) -> String {
+        let known = |w: &str| ACRONYMS.iter().any(|a| a.eq_ignore_ascii_case(w)) || self.words.iter().any(|v| v == w);
+        let mut out = String::with_capacity(text.len());
+        let mut word = String::new();
+        let flush = |word: &mut String, out: &mut String| {
+            if word.len() >= 3 && word.chars().all(|c| c.is_ascii_uppercase()) && !known(word) {
+                let chars: Vec<char> = word.chars().collect();
+                if let Some(fixed) = (1..chars.len())
+                    .filter(|&i| chars[i] == chars[i - 1])
+                    .map(|i| chars.iter().enumerate().filter(|&(j, _)| j != i).map(|(_, c)| *c).collect::<String>())
+                    .find(|w| known(w))
+                {
+                    *word = fixed;
+                }
+            }
+            out.push_str(word);
+            word.clear();
+        };
+        for c in text.chars() {
+            if c.is_ascii_alphanumeric() {
+                word.push(c);
+            } else {
+                flush(&mut word, &mut out);
+                out.push(c);
+            }
+        }
+        flush(&mut word, &mut out);
+        out
+    }
+
     /// Writes hotwords the way the list does ("nvidia" → "Nvidia") where they stand as words.
     pub fn canonical_case(&self, text: &str) -> String {
         let mut out = text.to_string();
@@ -288,5 +321,7 @@ mod tests {
         let h = Hotwords::new("Nvidia\nOpenAI");
         assert_eq!(h.canonical_case("ซื้อ nvidia กับ openai ไม่ใช่ nvidiax"), "ซื้อ Nvidia กับ OpenAI ไม่ใช่ nvidiax");
         assert_eq!(thai_acronyms_to_latin("ใช้จีพียูกับซีพียู ดีมาก"), "ใช้ GPU กับ CPU ดีมาก");
+        let h = Hotwords::new("MVP\nNvidia");
+        assert_eq!(h.fix_doubled_letters("ของ MVPP กับ GPUU และ CCPU แต่ COOL กับ SSS ไม่แตะ"), "ของ MVP กับ GPU และ CPU แต่ COOL กับ SSS ไม่แตะ");
     }
 }
