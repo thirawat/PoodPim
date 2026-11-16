@@ -60,6 +60,8 @@ enum UserEvent {
     /// Result of "Check for updates…".
     UpdateChecked(Result<Option<String>, String>),
     UpdateAnswer(String, bool),
+    /// The new version is in place (Windows) or its installer has started (macOS).
+    UpdateInstalled(Result<(), String>),
     /// None: cancelled; Some(delete the model too).
     UninstallAnswer(Option<bool>),
 }
@@ -123,7 +125,11 @@ struct App {
     pending_update: Option<String>,
     /// Already offered by the daily check this session (not asked again until the next launch).
     offered_update: Option<String>,
-    /// Quit at the end of this event (an update or uninstall script has taken over).
+    /// An update is being downloaded and put in place.
+    updating: bool,
+    /// The update is in place: restart into it once the user isn't recording.
+    restart_pending: bool,
+    /// Quit at the end of this event (an update or uninstall has taken over).
     quit: bool,
     /// Held while running so a second copy of the app can tell.
     _instance_lock: std::fs::File,
@@ -167,7 +173,19 @@ pub(crate) fn said(text: &str) -> &str {
 pub fn run() -> Result<()> {
     log_to_file();
     eprintln!("PoodPim {} ({} {})", update::CURRENT, std::env::consts::OS, std::env::consts::ARCH);
-    let Some(instance_lock) = single_instance() else {
+    update::clean_up_after_update();
+    // Just updated: the old copy is still quitting, so wait for its lock rather than report it.
+    let mut lock = single_instance();
+    if std::env::var_os(update::UPDATED_ENV).is_some() {
+        for _ in 0..75 {
+            if lock.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+            lock = single_instance();
+        }
+    }
+    let Some(instance_lock) = lock else {
         // Opened again while running (often because the menu-bar icon is hidden): say so.
         platform::alert(platform::ALREADY_RUNNING);
         return Ok(());
@@ -210,6 +228,8 @@ pub fn run() -> Result<()> {
         announced: false,
         pending_update: None,
         offered_update: None,
+        updating: false,
+        restart_pending: false,
         quit: false,
         _instance_lock: instance_lock,
     };
@@ -661,20 +681,48 @@ impl App {
                     self.pending_update = Some(tag); // ask again when the recording is done
                     return;
                 }
-                match update::start_install(&tag) {
-                    Ok(()) => {
-                        eprintln!("updating to {tag}");
-                        self.quit = true;
+                if self.updating {
+                    return;
+                }
+                self.updating = true;
+                eprintln!("updating to {tag}");
+                if !self.busy() {
+                    self.status_text = format!("Downloading PoodPim {}…", tag.trim_start_matches('v'));
+                }
+                let p = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let r = update::install(&tag).map_err(|e| format!("{e:#}"));
+                    let _ = p.send_event(UserEvent::UpdateInstalled(r));
+                });
+            }
+            UserEvent::UpdateInstalled(r) => {
+                self.updating = false;
+                match r {
+                    Ok(()) => self.restart_pending = true,
+                    Err(e) => {
+                        eprintln!("update failed: {e}");
+                        if !self.busy() {
+                            self.status_text = self.ready_text();
+                        }
+                        show_alert(format!("อัปเดตไม่ได้: {e}"));
                     }
-                    Err(e) => show_alert(format!("อัปเดตไม่ได้: {e:#}")),
                 }
             }
             UserEvent::UninstallAnswer(answer) => {
                 self.dialog_open = false;
                 let Some(delete_model) = answer else { return };
-                match update::start_uninstall(delete_model) {
-                    Ok(()) => self.quit = true,
-                    Err(e) => show_alert(format!("ถอนการติดตั้งไม่ได้: {e:#}")),
+                match update::uninstall(delete_model) {
+                    Ok(()) => {
+                        // macOS: uninstall.sh finishes once this app has quit. Windows: done.
+                        #[cfg(windows)]
+                        platform::alert("ลบ PoodPim ออกจากเครื่องแล้ว");
+                        self.quit = true;
+                    }
+                    Err(e) => {
+                        platform::alert(&format!("ถอนการติดตั้งไม่สำเร็จทั้งหมด: {e:#}"));
+                        // Windows has removed what it could, the app included: don't keep running.
+                        self.quit = cfg!(windows);
+                    }
                 }
             }
             UserEvent::Menu(_) => {}
@@ -697,8 +745,17 @@ impl App {
     }
 
     /// Asks about a newer release, unless the user is busy or another dialog is open (then later).
+    /// Also restarts into an installed update once the user isn't recording.
     fn offer_pending_update(&mut self) {
         if self.busy() || self.dialog_open {
+            return;
+        }
+        if self.restart_pending {
+            self.restart_pending = false;
+            match update::restart() {
+                Ok(()) => self.quit = true,
+                Err(e) => show_alert(format!("เปิด PoodPim เวอร์ชันใหม่ไม่ได้ กรุณาเปิดเอง: {e:#}")),
+            }
             return;
         }
         let Some(tag) = self.pending_update.take() else { return };

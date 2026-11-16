@@ -6,8 +6,9 @@
 #     copy in older Windows versions may be too old, so the redistributable goes next to the exe;
 #   - preset.json: local backend, no server URL or API key (see package-macos.sh);
 #   - README-TH.txt: Thai install guide;
-#   - install.ps1 / uninstall.ps1: the app runs them to update or remove itself.
-# Also writes <zip>.sha256, which install.ps1 checks the download against.
+#   - PoodPim.ico: Start menu shortcut and Settings > Apps icon.
+# Also writes <zip>.sha256, which install.ps1 and the app's updater check the download against.
+# No PowerShell scripts: the app updates and uninstalls itself.
 # The exe also needs the Visual C++ runtime (msvcp140.dll), present on most PCs; the guide
 # links the installer.
 set -eu
@@ -39,8 +40,7 @@ cp "target/$TARGET/release/poodpim.exe" "$STAGE/PoodPim.exe"
 cp "$DML_DIR/bin/x64-win/DirectML.dll" "$STAGE/"
 cp "$DML_DIR/LICENSE.txt" "$STAGE/LICENSE-DirectML.txt"
 cp scripts/share/install-th-windows.txt "$STAGE/README-TH.txt"
-cp install.ps1 uninstall.ps1 "$STAGE/"
-cp assets/PoodPim.ico "$STAGE/" # Start menu shortcut and Settings > Apps icon (install.ps1)
+cp assets/PoodPim.ico "$STAGE/"
 cat > "$STAGE/preset.json" <<'JSON'
 {
   "backend": "local",
