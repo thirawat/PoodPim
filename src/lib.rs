@@ -6,6 +6,7 @@
 pub mod asr;
 pub mod audio;
 pub mod features;
+pub mod hotwords;
 pub mod model;
 pub mod pipeline;
 pub mod segment;

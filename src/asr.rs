@@ -16,12 +16,42 @@ const ENC_DIM: usize = 1024;
 const STATE_LEN: usize = 2 * 640; // [2, 1, 640]
 const MAX_SYMBOLS_PER_FRAME: usize = 10;
 
+#[derive(Clone)]
+struct Hyp {
+    tokens: Vec<usize>,
+    last: i32,
+    s1: Vec<f32>,
+    s2: Vec<f32>,
+    score: f32,
+    ctx: crate::hotwords::State,
+}
+
+/// Hypotheses with the same text are one (scores log-added); keeps the best `beam`, best first.
+fn merge_and_prune(mut hyps: Vec<Hyp>, beam: usize) -> Vec<Hyp> {
+    hyps.sort_by(|a, b| b.score.total_cmp(&a.score));
+    let mut out: Vec<Hyp> = Vec::with_capacity(beam);
+    for h in hyps {
+        if let Some(m) = out.iter_mut().find(|m| m.tokens == h.tokens) {
+            let (a, c) = (m.score.max(h.score), m.score.min(h.score));
+            m.score = a + (1.0 + (c - a).exp()).ln();
+        } else if out.len() < beam {
+            out.push(h);
+        }
+    }
+    out
+}
+
 pub struct OpenThaiAsr {
     _env: ort::environment::Environment,
     encoder: Session,
     decoder: Session,
     tokens: Vec<String>,
     blank: usize,
+    /// Hotwords to favour while decoding (empty: plain greedy decoding).
+    hotwords: crate::hotwords::Hotwords,
+    beam: usize,
+    bonus: f32,
+    beam_blank_bias: f32,
 }
 
 impl OpenThaiAsr {
@@ -51,7 +81,16 @@ impl OpenThaiAsr {
             .map(str::to_owned)
             .collect();
         let blank = tokens.len();
-        let mut asr = Self { _env: env, encoder, decoder, tokens, blank };
+        // Experimental knobs (POC): POODPIM_HOTWORDS = file with one term per line.
+        let hotwords = match std::env::var_os("POODPIM_HOTWORDS") {
+            Some(p) => crate::hotwords::Hotwords::new(&std::fs::read_to_string(p).context("reading hotwords")?),
+            None => crate::hotwords::Hotwords::default(),
+        };
+        let envf = |k: &str, d: f32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        let beam = env_n("POODPIM_BEAM", 0);
+        let bonus = envf("POODPIM_BONUS", 1.5);
+        let beam_blank_bias = envf("POODPIM_BEAM_BLANK_BIAS", -1.0);
+        let mut asr = Self { _env: env, encoder, decoder, tokens, blank, hotwords, beam, bonus, beam_blank_bias };
         // ONNX Runtime is slow on its first runs (allocations, kernel set-up); warm it up
         // so the first real dictation is fast.
         let noise: Vec<f32> = (0..SAMPLE_RATE as usize * 3).map(|i| ((i * 7919 % 1000) as f32 / 1000.0 - 0.5) * 0.01).collect();
@@ -82,8 +121,12 @@ impl OpenThaiAsr {
         drop(enc_out);
         let t_enc = t_start.elapsed();
 
-        let blank_bias = if audio.len() < 2 * SAMPLE_RATE as usize { -2.5 } else { -1.0 };
-        let ids = self.greedy(&encoded, frames, blank_bias)?;
+        let short = audio.len() < 2 * SAMPLE_RATE as usize;
+        let ids = if self.beam > 0 && !short {
+            self.beam_search(&encoded, frames, self.beam, self.beam_blank_bias)?
+        } else {
+            self.greedy(&encoded, frames, if short { -2.5 } else { -1.0 })?
+        };
         if std::env::var_os("POODPIM_TIMING").is_some() {
             eprintln!("mel {:?} enc {:?} dec {:?} frames {frames} tokens {}", t_mel, t_enc - t_mel, t_start.elapsed() - t_enc, ids.len());
         }
@@ -128,10 +171,129 @@ impl OpenThaiAsr {
         Ok(out)
     }
 
+    /// Beam search over the RNN-T, with hotword biasing: each piece that continues a hotword
+    /// earns `bonus`, withdrawn if the match fails. All hypotheses of a step go through the
+    /// decoder in one batched call; scores are log-softmax. A hypothesis may emit up to
+    /// `BEAM_SYMBOLS_PER_FRAME` pieces in one 80 ms frame (fast speech needs more than one;
+    /// with a single one, letters went missing), but only while it can still make the beam.
+    fn beam_search(&mut self, enc: &[f32], frames: usize, beam: usize, blank_bias: f32) -> Result<Vec<usize>> {
+        const BEAM_SYMBOLS_PER_FRAME: usize = 3;
+        let mut hyps = vec![Hyp {
+            tokens: Vec::new(),
+            last: self.blank as i32,
+            s1: vec![0.0; STATE_LEN],
+            s2: vec![0.0; STATE_LEN],
+            score: 0.0,
+            ctx: Default::default(),
+        }];
+        for t in 0..frames {
+            let frame = &enc[t * ENC_DIM..(t + 1) * ENC_DIM];
+            // Hypotheses that have ended this frame (with a blank), and ones that may go on.
+            let mut ended: Vec<Hyp> = Vec::with_capacity(beam * 2);
+            let mut active = std::mem::take(&mut hyps);
+            for step in 0..BEAM_SYMBOLS_PER_FRAME {
+                if active.is_empty() {
+                    break;
+                }
+                let expanded = self.expand(frame, &active, beam, blank_bias)?;
+                let mut going_on = Vec::new();
+                for (h, emitted) in expanded {
+                    if emitted { going_on.push(h) } else { ended.push(h) }
+                }
+                ended = merge_and_prune(ended, beam);
+                // Only pursue a longer emission if it could still beat the beam's last place.
+                let floor = if ended.len() >= beam { ended[beam - 1].score } else { f32::NEG_INFINITY };
+                going_on.retain(|h| h.score > floor);
+                active = merge_and_prune(going_on, beam);
+                if step + 1 == BEAM_SYMBOLS_PER_FRAME {
+                    ended.append(&mut active); // out of symbols: move on without a blank
+                }
+            }
+            hyps = merge_and_prune(ended, beam);
+        }
+        // An unfinished hotword match doesn't count.
+        let best = hyps
+            .into_iter()
+            .max_by(|a, b| (a.score - self.hotwords.pending(a.ctx)).total_cmp(&(b.score - self.hotwords.pending(b.ctx))))
+            .map(|h| h.tokens)
+            .unwrap_or_default();
+        Ok(best)
+    }
+
+    /// One decoder call for all `hyps` on `frame`: for each, the blank extension (emitted =
+    /// false, same state) and the `beam` best pieces (emitted = true, new state).
+    fn expand(&mut self, frame: &[f32], hyps: &[Hyp], beam: usize, blank_bias: f32) -> Result<Vec<(Hyp, bool)>> {
+        let b = hyps.len();
+        let half = STATE_LEN / 2;
+        let vocab = self.blank + 1;
+        // encoder_outputs [B, 1024, 1], targets [B, 1], states [2, B, 640]
+        let enc_b: Vec<f32> = (0..b).flat_map(|_| frame.iter().copied()).collect();
+        let targets: Vec<i32> = hyps.iter().map(|h| h.last).collect();
+        let lens = vec![1i32; b];
+        let pack = |f: &dyn Fn(&Hyp) -> &Vec<f32>| -> Vec<f32> {
+            let mut v = Vec::with_capacity(STATE_LEN * b);
+            for layer in 0..2 {
+                for h in hyps {
+                    v.extend_from_slice(&f(h)[layer * half..(layer + 1) * half]);
+                }
+            }
+            v
+        };
+        let (s1, s2) = (pack(&|h| &h.s1), pack(&|h| &h.s2));
+        let res = self.decoder.run(ort::inputs![
+            "encoder_outputs" => TensorRef::from_array_view(([b, ENC_DIM, 1], &enc_b[..]))?,
+            "targets" => TensorRef::from_array_view(([b, 1], &targets[..]))?,
+            "target_length" => TensorRef::from_array_view(([b], &lens[..]))?,
+            "input_states_1" => TensorRef::from_array_view(([2usize, b, 640], &s1[..]))?,
+            "input_states_2" => TensorRef::from_array_view(([2usize, b, 640], &s2[..]))?,
+        ])?;
+        let (_, scores) = res["outputs"].try_extract_tensor::<f32>()?;
+        let (_, o1) = res["output_states_1"].try_extract_tensor::<f32>()?;
+        let (_, o2) = res["output_states_2"].try_extract_tensor::<f32>()?;
+        let unpack = |o: &[f32], i: usize| -> Vec<f32> {
+            let mut v = Vec::with_capacity(STATE_LEN);
+            for layer in 0..2 {
+                let base = layer * b * half + i * half;
+                v.extend_from_slice(&o[base..base + half]);
+            }
+            v
+        };
+        let mut out = Vec::with_capacity(b * (beam + 1));
+        for (i, h) in hyps.iter().enumerate() {
+            let logits = &scores[i * vocab..(i + 1) * vocab];
+            let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let lse = max + logits.iter().map(|&v| (v - max).exp()).sum::<f32>().ln();
+            // Every hypothesis ends each frame with one blank, so a bias on the blank would cancel
+            // out; the same preference for emitting is given as a bonus per emitted piece.
+            let mut stay = h.clone();
+            stay.score += logits[self.blank] - lse;
+            out.push((stay, false));
+            let mut top: Vec<(usize, f32)> = Vec::with_capacity(beam + 1);
+            for (k, &v) in logits.iter().enumerate() {
+                if k != self.blank && (top.len() < beam || v > top[top.len() - 1].1) {
+                    let pos = top.iter().position(|&(_, x)| v > x).unwrap_or(top.len());
+                    top.insert(pos, (k, v));
+                    top.truncate(beam);
+                }
+            }
+            let (n1, n2) = (unpack(o1, i), unpack(o2, i));
+            for (k, v) in top {
+                let (ctx, delta) = self.hotwords.advance(h.ctx, &self.tokens[k], self.bonus);
+                let mut tokens = h.tokens.clone();
+                tokens.push(k);
+                let score = h.score + v - lse - blank_bias + delta;
+                out.push((Hyp { tokens, last: k as i32, s1: n1.clone(), s2: n2.clone(), score, ctx }, true));
+            }
+        }
+        Ok(out)
+    }
+
     fn detokenize(&self, ids: &[usize]) -> String {
         let text: String = ids.iter().filter_map(|&i| self.tokens.get(i)).map(String::as_str).collect();
         // The vocabulary spells sara am as nikhahit + sara aa (U+0E4D U+0E32); use the
         // single code point U+0E33 (ำ) so search and spell-check work on the result.
-        text.replace('\u{2581}', " ").replace("\u{0E4D}\u{0E32}", "\u{0E33}").trim().to_string()
+        let text = text.replace('\u{2581}', " ").replace("\u{0E4D}\u{0E32}", "\u{0E33}");
+        let text = crate::hotwords::thai_acronyms_to_latin(&text);
+        self.hotwords.canonical_case(&text).trim().to_string()
     }
 }
