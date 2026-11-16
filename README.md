@@ -27,7 +27,7 @@ The installer downloads the latest release, checks its SHA-256 (and on macOS tha
 carries the PoodPim signature), installs it (`/Applications`, or
 `%LOCALAPPDATA%\Programs\PoodPim` with a Start menu shortcut) and opens it; the app then
 offers to download the speech model (2.6 GB). Run it again to update. A release candidate:
-put `POODPIM_VERSION=v1.0.2-rc.1` in front of `sh` (macOS) or set `$env:POODPIM_VERSION`
+put `POODPIM_VERSION=v1.0.1-rc.1` in front of `sh` (macOS) or set `$env:POODPIM_VERSION`
 first (Windows).
 
 Files fetched this way aren't quarantined, so macOS doesn't ask to "Open Anyway" and
