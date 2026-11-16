@@ -4,7 +4,7 @@
 #   irm https://raw.githubusercontent.com/thirawat/PoodPim/main/install.ps1 | iex
 #
 # A given version, e.g. a release candidate:
-#   $env:POODPIM_VERSION = 'v1.0.2-rc.1'; irm https://raw.githubusercontent.com/thirawat/PoodPim/main/install.ps1 | iex
+#   $env:POODPIM_VERSION = 'v1.0.1-rc.1'; irm https://raw.githubusercontent.com/thirawat/PoodPim/main/install.ps1 | iex
 #
 # It downloads the release zip from GitHub, checks its SHA-256, puts PoodPim in
 # %LOCALAPPDATA%\Programs\PoodPim, adds a Start menu shortcut and an entry in

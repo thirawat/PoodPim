@@ -4,7 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/thirawat/PoodPim/main/install.sh | sh
 #
 # A given version, e.g. a release candidate:
-#   curl -fsSL https://raw.githubusercontent.com/thirawat/PoodPim/main/install.sh | POODPIM_VERSION=v1.0.2-rc.1 sh
+#   curl -fsSL https://raw.githubusercontent.com/thirawat/PoodPim/main/install.sh | POODPIM_VERSION=v1.0.1-rc.1 sh
 #
 # It downloads the release zip from GitHub, checks its SHA-256 and that the app is signed
 # with the PoodPim certificate, puts PoodPim.app in /Applications (or ~/Applications when
