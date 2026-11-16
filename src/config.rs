@@ -27,6 +27,8 @@ pub struct Config {
     pub restore_clipboard: bool,
     /// Start the app when the user logs in (macOS LaunchAgent / Windows Run key).
     pub start_at_login: bool,
+    /// Said "later" to replacing the old full-precision model with the smaller int8 one.
+    pub model_upgrade_declined: bool,
 }
 
 impl Default for Config {
@@ -38,6 +40,7 @@ impl Default for Config {
             mixed_english: true,
             restore_clipboard: true,
             start_at_login: true,
+            model_upgrade_declined: false,
         }
     }
 }

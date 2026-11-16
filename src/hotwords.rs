@@ -9,6 +9,62 @@
 //! output. Acronyms the model spells in Thai are mapped back afterwards
 //! (`thai_acronyms_to_latin`).
 
+/// The vocabulary new users start with (assets/vocabulary.txt): ~140 tech terms.
+pub const DEFAULT_LIST: &str = include_str!("../assets/vocabulary.txt");
+
+/// The user's vocabulary file (created from `DEFAULT_LIST` the first time).
+pub fn user_file() -> std::path::PathBuf {
+    crate::model::app_dir(dirs::config_dir()).join("vocabulary.txt")
+}
+
+/// Reads the user's vocabulary, creating the file with the default list if it doesn't exist.
+/// Returns the list's text and when the file last changed (to reload it after edits).
+pub fn read_user_list() -> (String, Option<std::time::SystemTime>) {
+    let path = user_file();
+    if !path.exists() {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&path, DEFAULT_LIST);
+    }
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|_| DEFAULT_LIST.to_string());
+    let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    (text, modified)
+}
+
+/// The terms of a list, for sending to the server: one per line, comments dropped,
+/// percent-encoded so it fits in an HTTP header.
+pub fn to_header(list: &str) -> String {
+    let terms: Vec<&str> = list.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
+    let mut out = String::new();
+    for b in terms.join("\n").bytes() {
+        if b.is_ascii_alphanumeric() || b" .-_+#".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The list sent by `to_header`.
+pub fn from_header(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok());
+        if let (b'%', Some(b)) = (bytes[i], hex) {
+            out.push(b);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 #[derive(Default)]
 struct Node {
     children: Vec<(char, u32)>,
@@ -216,6 +272,21 @@ mod tests {
         let (s, d) = h.advance(s, "อา", 2.0);
         assert_eq!(d, -2.0, "a broken match gives the bonus back");
         assert_eq!(h.pending(s), 0.0);
+    }
+
+    #[test]
+    fn header_round_trip() {
+        let list = "# comment\nNvidia\nmachine learning\nC++\nภาษาไทย\n";
+        let h = to_header(list);
+        assert!(h.is_ascii());
+        assert_eq!(from_header(&h), "Nvidia\nmachine learning\nC++\nภาษาไทย");
+    }
+
+    #[test]
+    fn default_list_parses() {
+        let h = Hotwords::new(DEFAULT_LIST);
+        assert!(h.words.len() > 100);
+        assert!(!h.words.iter().any(|w| w == "LINE" || w == "Grab"), "ambiguous with Thai words");
     }
 
     #[test]

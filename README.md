@@ -26,7 +26,7 @@
 Hold a key, speak Thai (or Thai mixed with English), let go, and the text is typed where
 your cursor is. Speech recognition runs locally on the CPU with
 [iapp/OpenThai2.0-ASR-Streaming-ONNX](https://huggingface.co/iapp/OpenThai2.0-ASR-Streaming-ONNX)
-(640M-parameter FastConformer + RNN-T, fp32), or on your own AWS Lambda.
+(640M-parameter FastConformer + RNN-T, int8 encoder), or on your own AWS Lambda.
 
 Written in Rust: one ~22 MB binary, ONNX Runtime linked in statically.
 
@@ -47,7 +47,7 @@ irm https://raw.githubusercontent.com/thirawat/PoodPim/main/install.ps1 | iex
 The installer downloads the latest release, checks its SHA-256 (and on macOS that the app
 carries the PoodPim signature), installs it (`/Applications`, or
 `%LOCALAPPDATA%\Programs\PoodPim` with a Start menu shortcut) and opens it; the app then
-offers to download the speech model (2.6 GB). Run it again to update. A release candidate:
+offers to download the speech model (1 GB). Run it again to update. A release candidate:
 put `POODPIM_VERSION=v1.0.1-rc.1` in front of `sh` (macOS) or set `$env:POODPIM_VERSION`
 first (Windows).
 
@@ -78,9 +78,9 @@ restore clipboard, paste last transcript, download model.
 
 | | Local | Serverless (AWS Lambda) |
 |---|---|---|
-| Where | this computer (fp32 model, ~3 GB RAM) | Lambda in ap-southeast-7 (int8 model) |
+| Where | this computer (int8 model, ~1 GB RAM) | Lambda in ap-southeast-7 (int8 model) |
 | 6 s sentence | ~0.45 s | ~0.9 s warm · first use after ~10 min idle: +13 s cold start |
-| Needs | model download (2.6 GB) | internet, server URL + API key |
+| Needs | model download (1 GB) | internet, server URL + API key |
 | Audio leaves the machine | no | yes (HTTPS to your own AWS account) |
 
 In serverless mode the app wakes the Lambda as soon as the talk key goes down, so most
@@ -103,11 +103,36 @@ whole (CER 9.3% vs 10.0% against the script, mostly digits/English spellings). S
 
 ## Model
 
-~2.6 GB, downloaded once from the menu or with `poodpim download`, into
+The int8 build (~1 GB), downloaded once from the menu or with `poodpim download`, into
 `$POODPIM_MODEL_DIR` or the per-user data folder:
 
 - macOS: `~/Library/Application Support/poodpim/openthai-asr`
 - Windows: `%APPDATA%\poodpim\openthai-asr`
+
+Versions before 1.0.2 downloaded the fp32 encoder (2.6 GB of RAM). The app offers once to
+replace it with int8 and deletes the fp32 files after the int8 model has loaded. On
+[tools/asr-eval](tools/asr-eval/eval.py) (60 clips of fast Thai/English tech talk) int8 was
+as accurate (CER 26.0% vs 25.5%, within noise) with 0.99 GB instead of 2.64 GB of RAM and a
+2.3× faster encoder.
+
+## Vocabulary (English terms)
+
+The model hears many English words in Thai speech but spells them by ear ("จีพียู",
+"เอ็นเดีย"). Two things help, both in Thai + English mode:
+
+- **Hotwords.** Words in the user's vocabulary file (menu → My vocabulary…; created from
+  [assets/vocabulary.txt](assets/vocabulary.txt), ~140 tech terms) are favoured while
+  decoding: beam search (4 hypotheses, batched into one decoder call per step, up to 3 pieces
+  per 80 ms frame) over a character trie of the terms, so any way the model splits a word into
+  pieces matches, with a bonus per matching piece that is taken back if the match fails.
+  The list is reloaded when the file changes, and sent to the serverless backend in the
+  `x-poodpim-vocabulary` header. An empty list means plain greedy decoding.
+- **Acronyms.** Tech acronyms spelled in Thai are written in Latin ("จีพียู" → "GPU").
+
+On tools/asr-eval, against greedy fp32: CER 23.4% vs 25.5%, English words of the subtitles
+found 59% vs 39%; decoding took 1.8× as long, but with the int8 encoder the whole run used
+31% less CPU time. Short words that sound like Thai ones (LINE ~ "ไลน์") cause false matches,
+so the default list leaves them out. Slowing the audio down before decoding did not help.
 
 ## Build
 
@@ -135,7 +160,7 @@ The app starts at login by default (menu → Start at login; a LaunchAgent in
 Windows), pointing at wherever it was last started from.
 
 In Local mode without a downloaded model, starting the app, choosing Local or pressing the
-talk key offers to download it (2.6 GB).
+talk key offers to download it (1 GB).
 The app is not notarized, so recipients open it once via System Settings › Privacy &
 Security › Open Anyway. Apple-silicon Macs only (arm64 build).
 

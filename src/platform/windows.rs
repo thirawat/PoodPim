@@ -128,6 +128,11 @@ pub fn set_autostart(enable: bool) -> anyhow::Result<()> {
     if r == ERROR_SUCCESS { Ok(()) } else { Err(anyhow::anyhow!("registry: {r:?}")) }
 }
 
+/// Opens a text file in Notepad.
+pub fn open_in_editor(path: &std::path::Path) {
+    let _ = std::process::Command::new("notepad.exe").arg(path).spawn();
+}
+
 /// Windows needs no permission for the keyboard hook.
 pub fn open_permission_settings() {}
 

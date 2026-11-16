@@ -17,6 +17,9 @@ pub struct Server {
     pub api_key: String,
 }
 
+/// The user's vocabulary (see `hotwords::to_header`).
+pub const VOCABULARY_HEADER: &str = "x-poodpim-vocabulary";
+
 #[derive(Deserialize)]
 struct WarmReply {
     load_ms: u64,
@@ -48,19 +51,28 @@ impl Server {
         Ok(reply.load_ms)
     }
 
-    pub fn transcribe(&self, audio: &[f32], mixed_english: bool) -> Result<String> {
+    /// `vocabulary`: the user's word list, percent-encoded (`hotwords::to_header`); servers
+    /// older than 1.0.2 ignore it.
+    pub fn transcribe(&self, audio: &[f32], mixed_english: bool, vocabulary: &str) -> Result<String> {
         let wav = encode_wav(audio);
         let query = if mixed_english { "?mixed=1" } else { "?mixed=0" };
-        let reply: TranscribeReply = self.call("transcribe", Some(wav), query)?;
+        let reply: TranscribeReply = self.call_with("transcribe", Some(wav), query, vocabulary)?;
         Ok(reply.text)
     }
 
     fn call<T: for<'de> Deserialize<'de>>(&self, path: &str, body: Option<Vec<u8>>, query: &str) -> Result<T> {
+        self.call_with(path, body, query, "")
+    }
+
+    fn call_with<T: for<'de> Deserialize<'de>>(&self, path: &str, body: Option<Vec<u8>>, query: &str, vocabulary: &str) -> Result<T> {
         if self.url.is_empty() || self.api_key.is_empty() {
             return Err(anyhow!("server URL / API key not set"));
         }
         let url = format!("{}{query}", self.endpoint(path));
-        let req = agent().post(&url).header("x-api-key", &self.api_key);
+        let mut req = agent().post(&url).header("x-api-key", &self.api_key);
+        if !vocabulary.is_empty() {
+            req = req.header(VOCABULARY_HEADER, vocabulary);
+        }
         let resp = match body {
             Some(b) => req.header("content-type", "audio/wav").send(&b[..]),
             None => req.send_empty(),

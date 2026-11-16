@@ -21,6 +21,7 @@ use lambda_http::{Body, Error, Request, RequestExt, Response, run, service_fn};
 use poodpim::asr::OpenThaiAsr;
 use poodpim::audio::{decode_wav, trim_silence};
 use poodpim::features::SAMPLE_RATE;
+use poodpim::hotwords::Hotwords;
 use poodpim::model;
 
 /// `POODPIM_<name>`, or `THOCR_<name>` (the variable names before the app was renamed).
@@ -74,6 +75,20 @@ fn json(status: u16, value: serde_json::Value) -> Result<Response<Body>, Error> 
         .body(Body::from(value.to_string()))?)
 }
 
+/// The client's word list (header `x-poodpim-vocabulary`), parsed once per distinct list.
+fn vocabulary(header: &str) -> std::sync::Arc<Hotwords> {
+    static LAST: Mutex<Option<(String, std::sync::Arc<Hotwords>)>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap();
+    if let Some((h, v)) = last.as_ref() {
+        if h == header {
+            return v.clone();
+        }
+    }
+    let v = std::sync::Arc::new(Hotwords::new(&poodpim::hotwords::from_header(header)));
+    *last = Some((header.to_string(), v.clone()));
+    v
+}
+
 /// Constant-time comparison so the key can't be guessed byte by byte from timing.
 fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
@@ -116,8 +131,9 @@ async fn handler(req: Request) -> Result<Response<Body>, Error> {
                 Ok(a) => a,
                 Err(e) => return json(500, serde_json::json!({"error": format!("{e:#}")})),
             };
+            let vocabulary = vocabulary(req.headers().get("x-poodpim-vocabulary").and_then(|v| v.to_str().ok()).unwrap_or(""));
             let t0 = Instant::now();
-            let result = asr.lock().unwrap().transcribe(audio, mixed);
+            let result = asr.lock().unwrap().transcribe(audio, mixed, &vocabulary);
             match result {
                 Ok(text) => json(
                     200,

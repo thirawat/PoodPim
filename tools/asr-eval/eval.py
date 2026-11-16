@@ -9,6 +9,7 @@ Scores: CER after normalising (spaces/punctuation dropped, lower case, decompose
 fixed), and recall of the English words of the reference.
 """
 import json
+import os
 import re
 import subprocess
 import sys
@@ -107,7 +108,10 @@ def run(name, tempo=None, thai_only=False):
                             "-ar", "16000", str(dst)], check=True)
             src = dst
         files.append(str(src))
-    args = [str(POODPIM), "transcribe", *files] + (["--thai-only"] if thai_only else [])
+    # POODPIM_EVAL_ARGS: extra CLI flags, e.g. "--vocabulary assets/vocabulary.txt" or "--no-vocabulary"
+    # (without one, the CLI uses, and on first use creates, the user's own vocabulary file).
+    extra = os.environ.get("POODPIM_EVAL_ARGS", "--no-vocabulary").split()
+    args = [str(POODPIM), "transcribe", *files, *extra] + (["--thai-only"] if thai_only else [])
     out = subprocess.run(args, capture_output=True, text=True, check=True).stdout
     hyps = {}
     for line in out.splitlines():

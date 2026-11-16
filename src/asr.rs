@@ -9,6 +9,7 @@ use ort::session::builder::{AutoDevicePolicy, GraphOptimizationLevel};
 use ort::value::{Tensor, TensorRef};
 
 use crate::features::{N_MELS, SAMPLE_RATE, log_mel};
+use crate::hotwords::Hotwords;
 
 const PROMPT_THAI: i64 = 32;
 const PROMPT_THAI_ENGLISH: i64 = 63;
@@ -47,8 +48,7 @@ pub struct OpenThaiAsr {
     decoder: Session,
     tokens: Vec<String>,
     blank: usize,
-    /// Hotwords to favour while decoding (empty: plain greedy decoding).
-    hotwords: crate::hotwords::Hotwords,
+    /// Beam search settings (tuned on tools/asr-eval; env overrides for tuning only).
     beam: usize,
     bonus: f32,
     beam_blank_bias: f32,
@@ -81,26 +81,26 @@ impl OpenThaiAsr {
             .map(str::to_owned)
             .collect();
         let blank = tokens.len();
-        // Experimental knobs (POC): POODPIM_HOTWORDS = file with one term per line.
-        let hotwords = match std::env::var_os("POODPIM_HOTWORDS") {
-            Some(p) => crate::hotwords::Hotwords::new(&std::fs::read_to_string(p).context("reading hotwords")?),
-            None => crate::hotwords::Hotwords::default(),
-        };
+        // Measured on tools/asr-eval (fast Thai/English tech speech): beam 4, a 1.5 bonus per
+        // hotword piece and an emission bias of -0.5 gave the lowest CER with the most English
+        // words right. The variables are for re-tuning, not for users.
         let envf = |k: &str, d: f32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
-        let beam = env_n("POODPIM_BEAM", 0);
+        let beam = env_n("POODPIM_BEAM", 4);
         let bonus = envf("POODPIM_BONUS", 1.5);
-        let beam_blank_bias = envf("POODPIM_BEAM_BLANK_BIAS", -1.0);
-        let mut asr = Self { _env: env, encoder, decoder, tokens, blank, hotwords, beam, bonus, beam_blank_bias };
+        let beam_blank_bias = envf("POODPIM_BEAM_BLANK_BIAS", -0.5);
+        let mut asr = Self { _env: env, encoder, decoder, tokens, blank, beam, bonus, beam_blank_bias };
         // ONNX Runtime is slow on its first runs (allocations, kernel set-up); warm it up
         // so the first real dictation is fast.
         let noise: Vec<f32> = (0..SAMPLE_RATE as usize * 3).map(|i| ((i * 7919 % 1000) as f32 / 1000.0 - 0.5) * 0.01).collect();
         for _ in 0..2 {
-            asr.transcribe(&noise, true)?;
+            asr.transcribe(&noise, true, &Hotwords::default())?;
         }
         Ok(asr)
     }
 
-    pub fn transcribe(&mut self, audio: &[f32], mixed_english: bool) -> Result<String> {
+    /// Speech (16 kHz mono) to text. With `mixed_english` and a non-empty `vocabulary`, beam
+    /// search favours the vocabulary's words; otherwise greedy decoding.
+    pub fn transcribe(&mut self, audio: &[f32], mixed_english: bool, vocabulary: &Hotwords) -> Result<String> {
         if audio.len() < (SAMPLE_RATE as usize) / 5 {
             return Ok(String::new());
         }
@@ -122,15 +122,15 @@ impl OpenThaiAsr {
         let t_enc = t_start.elapsed();
 
         let short = audio.len() < 2 * SAMPLE_RATE as usize;
-        let ids = if self.beam > 0 && !short {
-            self.beam_search(&encoded, frames, self.beam, self.beam_blank_bias)?
+        let ids = if self.beam > 0 && !short && mixed_english && !vocabulary.is_empty() {
+            self.beam_search(&encoded, frames, self.beam, self.beam_blank_bias, vocabulary)?
         } else {
             self.greedy(&encoded, frames, if short { -2.5 } else { -1.0 })?
         };
         if std::env::var_os("POODPIM_TIMING").is_some() {
             eprintln!("mel {:?} enc {:?} dec {:?} frames {frames} tokens {}", t_mel, t_enc - t_mel, t_start.elapsed() - t_enc, ids.len());
         }
-        Ok(self.detokenize(&ids))
+        Ok(self.detokenize(&ids, vocabulary))
     }
 
     fn greedy(&mut self, enc: &[f32], frames: usize, blank_bias: f32) -> Result<Vec<usize>> {
@@ -176,7 +176,7 @@ impl OpenThaiAsr {
     /// decoder in one batched call; scores are log-softmax. A hypothesis may emit up to
     /// `BEAM_SYMBOLS_PER_FRAME` pieces in one 80 ms frame (fast speech needs more than one;
     /// with a single one, letters went missing), but only while it can still make the beam.
-    fn beam_search(&mut self, enc: &[f32], frames: usize, beam: usize, blank_bias: f32) -> Result<Vec<usize>> {
+    fn beam_search(&mut self, enc: &[f32], frames: usize, beam: usize, blank_bias: f32, hw: &Hotwords) -> Result<Vec<usize>> {
         const BEAM_SYMBOLS_PER_FRAME: usize = 3;
         let mut hyps = vec![Hyp {
             tokens: Vec::new(),
@@ -195,7 +195,7 @@ impl OpenThaiAsr {
                 if active.is_empty() {
                     break;
                 }
-                let expanded = self.expand(frame, &active, beam, blank_bias)?;
+                let expanded = self.expand(frame, &active, beam, blank_bias, hw)?;
                 let mut going_on = Vec::new();
                 for (h, emitted) in expanded {
                     if emitted { going_on.push(h) } else { ended.push(h) }
@@ -214,7 +214,7 @@ impl OpenThaiAsr {
         // An unfinished hotword match doesn't count.
         let best = hyps
             .into_iter()
-            .max_by(|a, b| (a.score - self.hotwords.pending(a.ctx)).total_cmp(&(b.score - self.hotwords.pending(b.ctx))))
+            .max_by(|a, b| (a.score - hw.pending(a.ctx)).total_cmp(&(b.score - hw.pending(b.ctx))))
             .map(|h| h.tokens)
             .unwrap_or_default();
         Ok(best)
@@ -222,7 +222,7 @@ impl OpenThaiAsr {
 
     /// One decoder call for all `hyps` on `frame`: for each, the blank extension (emitted =
     /// false, same state) and the `beam` best pieces (emitted = true, new state).
-    fn expand(&mut self, frame: &[f32], hyps: &[Hyp], beam: usize, blank_bias: f32) -> Result<Vec<(Hyp, bool)>> {
+    fn expand(&mut self, frame: &[f32], hyps: &[Hyp], beam: usize, blank_bias: f32, hw: &Hotwords) -> Result<Vec<(Hyp, bool)>> {
         let b = hyps.len();
         let half = STATE_LEN / 2;
         let vocab = self.blank + 1;
@@ -278,7 +278,7 @@ impl OpenThaiAsr {
             }
             let (n1, n2) = (unpack(o1, i), unpack(o2, i));
             for (k, v) in top {
-                let (ctx, delta) = self.hotwords.advance(h.ctx, &self.tokens[k], self.bonus);
+                let (ctx, delta) = hw.advance(h.ctx, &self.tokens[k], self.bonus);
                 let mut tokens = h.tokens.clone();
                 tokens.push(k);
                 let score = h.score + v - lse - blank_bias + delta;
@@ -288,12 +288,12 @@ impl OpenThaiAsr {
         Ok(out)
     }
 
-    fn detokenize(&self, ids: &[usize]) -> String {
+    fn detokenize(&self, ids: &[usize], vocabulary: &Hotwords) -> String {
         let text: String = ids.iter().filter_map(|&i| self.tokens.get(i)).map(String::as_str).collect();
         // The vocabulary spells sara am as nikhahit + sara aa (U+0E4D U+0E32); use the
         // single code point U+0E33 (ำ) so search and spell-check work on the result.
         let text = text.replace('\u{2581}', " ").replace("\u{0E4D}\u{0E32}", "\u{0E33}");
         let text = crate::hotwords::thai_acronyms_to_latin(&text);
-        self.hotwords.canonical_case(&text).trim().to_string()
+        vocabulary.canonical_case(&text).trim().to_string()
     }
 }

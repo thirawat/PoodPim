@@ -1,0 +1,158 @@
+# คำศัพท์ของฉัน: คำภาษาอังกฤษที่อยากให้ PoodPim ถอดออกมาเป็นตัวอักษรอังกฤษ
+# เช่น ชื่อบริษัท ชื่อสินค้า ศัพท์เทคนิคที่ใช้บ่อย หนึ่งคำ (หรือวลี) ต่อบรรทัด
+# บรรทัดที่ขึ้นต้นด้วย # จะถูกข้าม
+#
+# - เขียนแบบที่อยากให้ออกมา เช่น Nvidia, ChatGPT (ตัวพิมพ์เล็ก-ใหญ่ตามนี้)
+# - ใช้กับโหมด Thai + English เท่านั้น
+# - ไม่ควรใส่คำสั้นที่เสียงพ้องกับคำไทย (เช่น LINE ที่เสียงคล้าย "ไลน์")
+#   แอปอาจใส่คำนั้นในที่ที่คุณไม่ได้พูด
+# - ไม่จำเป็นต้องยาวมาก ทดสอบแล้วได้ผลดีที่ราว 150 คำ
+# - ลบทุกคำออก = ถอดเสียงแบบเดิม (ไม่ใช้รายการคำ)
+#
+# My vocabulary: English words PoodPim should write in Latin letters, one per line.
+# Companies
+Google
+Microsoft
+Apple
+Amazon
+Facebook
+Instagram
+Netflix
+Nvidia
+AMD
+Intel
+Qualcomm
+Samsung
+Huawei
+Xiaomi
+Tesla
+SpaceX
+OpenAI
+Anthropic
+DeepMind
+LinkedIn
+YouTube
+TikTok
+Twitter
+Oracle
+IBM
+Cisco
+Adobe
+Salesforce
+Shopify
+Lazada
+Shopee
+Agoda
+Uber
+Airbnb
+Alibaba
+Tencent
+ByteDance
+GitHub
+GitLab
+# Products and platforms
+ChatGPT
+GPT
+Gemini
+Claude
+Copilot
+Llama
+DeepSeek
+Midjourney
+iPhone
+iPad
+MacBook
+Android
+Windows
+Linux
+macOS
+iOS
+Chrome
+Excel
+PowerPoint
+Gmail
+Slack
+Figma
+Jira
+AWS
+Azure
+Kubernetes
+Docker
+Terraform
+Python
+JavaScript
+TypeScript
+Golang
+React
+Node.js
+PostgreSQL
+MySQL
+MongoDB
+Redis
+Kafka
+TensorFlow
+PyTorch
+CUDA
+# Terms
+AI
+AGI
+GPU
+CPU
+TPU
+API
+SDK
+LLM
+model
+prompt
+token
+agent
+data
+dataset
+database
+data center
+cloud
+server
+serverless
+software
+hardware
+startup
+open source
+machine learning
+deep learning
+neural network
+transformer
+training
+inference
+fine-tune
+benchmark
+robot
+robotics
+chatbot
+cybersecurity
+blockchain
+crypto
+Bitcoin
+DevOps
+backend
+frontend
+deploy
+production
+framework
+platform
+algorithm
+computing
+semiconductor
+scale
+scaling
+investor
+venture capital
+IPO
+CEO
+CTO
+engineer
+engineering
+developer
+Silicon Valley
+MIT
+Stanford
+Harvard

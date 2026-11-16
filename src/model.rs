@@ -7,8 +7,13 @@ pub use download::{download, remote_sizes};
 
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 const REPO_URL: &str = "https://huggingface.co/iapp/OpenThai2.0-ASR-Streaming-ONNX/resolve/main";
+/// The int8 build: encoder.int8.onnx, decoder_joint.onnx, tokens.txt (+ the weights file).
+/// On a 60-clip benchmark of fast Thai/English speech it was as accurate as fp32 (CER within
+/// half a point) with 0.99 GB instead of 2.6 GB of RAM and a 2.3x faster encoder.
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
-const ZIP_NAME: &str = "openthai2.0-asr-streaming-fp32.asr.zip";
+const ZIP_NAME: &str = "openthai2.0-asr-streaming-int8.asr.zip";
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+const DATA_NAME: &str = "encoder.int8.onnx.data";
 const REQUIRED: [&str; 2] = ["decoder_joint.onnx", "tokens.txt"];
 
 /// `$POODPIM_MODEL_DIR`, else `<data dir>/poodpim/openthai-asr`
@@ -36,13 +41,26 @@ pub fn is_ready(dir: &Path) -> bool {
     REQUIRED.iter().all(|f| dir.join(f).is_file()) && encoder_path(dir).is_some()
 }
 
-/// The encoder graph: full precision (`encoder.onnx`) if present, else the int8 build.
-/// Each needs its weights file (`<name>.data`) beside it.
+/// The encoder graph: the int8 build if present, else full precision (`encoder.onnx`, what
+/// versions before 1.0.2 downloaded). Each needs its weights file (`<name>.data`) beside it.
 pub fn encoder_path(dir: &Path) -> Option<PathBuf> {
-    ["encoder.onnx", "encoder.int8.onnx"]
+    ["encoder.int8.onnx", "encoder.onnx"]
         .iter()
         .map(|f| dir.join(f))
         .find(|p| p.is_file() && p.with_extension("onnx.data").is_file())
+}
+
+/// The model in `dir` is the old full-precision one only (worth replacing with int8).
+pub fn is_fp32_only(dir: &Path) -> bool {
+    encoder_path(dir).is_some_and(|p| p.file_name().is_some_and(|n| n == "encoder.onnx"))
+}
+
+/// Deletes the full-precision encoder (2.4 GB) once the int8 one is in place.
+pub fn remove_fp32(dir: &Path) {
+    if encoder_path(dir).is_some_and(|p| p.file_name().is_some_and(|n| n == "encoder.int8.onnx")) {
+        let _ = std::fs::remove_file(dir.join("encoder.onnx"));
+        let _ = std::fs::remove_file(dir.join("encoder.onnx.data"));
+    }
 }
 
 #[cfg(feature = "desktop")]
@@ -53,12 +71,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 
-use super::{REPO_URL, ZIP_NAME, is_ready};
+use super::{DATA_NAME, REPO_URL, ZIP_NAME, is_ready};
 
-/// Downloads the fp32 ONNX model (~2.6 GB). `progress(done_bytes, total_bytes)` is called as it goes.
+/// Downloads the int8 ONNX model (~1 GB). `progress(done_bytes, total_bytes)` is called as it goes.
 pub fn download(dir: &Path, progress: &dyn Fn(u64, u64)) -> Result<()> {
     std::fs::create_dir_all(dir)?;
-    let files = ["encoder.onnx.data", ZIP_NAME, "LICENSE"];
+    let files = [DATA_NAME, ZIP_NAME, "LICENSE"];
     let sizes: Vec<u64> = files.iter().map(|f| remote_size(f).unwrap_or(0)).collect();
     let total: u64 = sizes.iter().sum();
     let mut done = 0u64;
@@ -97,7 +115,7 @@ fn agent() -> ureq::Agent {
 
 /// Remote file sizes, without downloading (for `poodpim download --check`).
 pub fn remote_sizes() -> Result<Vec<(&'static str, u64)>> {
-    ["encoder.onnx.data", ZIP_NAME, "LICENSE"].into_iter().map(|f| Ok((f, remote_size(f)?))).collect()
+    [DATA_NAME, ZIP_NAME, "LICENSE"].into_iter().map(|f| Ok((f, remote_size(f)?))).collect()
 }
 
 fn remote_size(file: &str) -> Result<u64> {

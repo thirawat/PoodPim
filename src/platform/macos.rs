@@ -173,6 +173,11 @@ pub fn set_autostart(enable: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Opens a text file in TextEdit.
+pub fn open_in_editor(path: &std::path::Path) {
+    let _ = std::process::Command::new("open").arg("-t").arg(path).spawn();
+}
+
 /// Opens System Settings › Privacy & Security › Accessibility.
 pub fn open_permission_settings() {
     let _ = std::process::Command::new("open")
