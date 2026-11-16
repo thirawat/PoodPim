@@ -1,9 +1,8 @@
 #!/bin/sh
 # Build dist/PoodPim-<version>-mac.zip to give to other people: PoodPim.app preset to the
-# serverless backend and a Thai install guide. Neither the server URL nor the API key is in
-# the zip (it may be published): give them to each person separately; the app asks for both
-# the first time the talk key is pressed. Rotate the key (deploy/lambda/README.md) to cut
-# everyone off.
+# local backend (it offers to download the model on first launch) and a Thai install guide.
+# Neither a server URL nor an API key is in the zip (it may be published): to use a team's
+# serverless backend, give them to each person separately (menu → Server URL & API key…).
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -13,10 +12,10 @@ ZIP=dist/PoodPim-$VERSION-mac.zip
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-# The preset: serverless backend with no server URL or key; the app asks for both.
+# The preset: local backend, no server URL or key.
 cat > "$TMP/preset.json" <<'JSON'
 {
-  "backend": "lambda",
+  "backend": "local",
   "server_url": "",
   "api_key": "",
   "mixed_english": true,

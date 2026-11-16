@@ -168,6 +168,10 @@ pub fn run() -> Result<()> {
                 }
                 app.apply_autostart();
                 app.start_backend();
+                // First launch in Local mode: ask about the model now, not on the first key press.
+                if app.state == State::NeedsModel {
+                    app.offer_download();
+                }
             }
             Event::UserEvent(ev) => {
                 if let UserEvent::Menu(MenuEvent { id }) = &ev {
@@ -433,11 +437,17 @@ impl App {
                     Err(e) => self.fail(&e),
                 }
             }
-            UserEvent::DownloadDone(Err(e)) => self.fail(&e),
+            // The server may have been set up during the download (that switches to Lambda):
+            // then the download no longer matters, so start whichever backend is chosen now.
+            UserEvent::DownloadDone(Err(e)) if self.cfg.backend == Backend::Local => self.fail(&e),
+            UserEvent::DownloadDone(Err(e)) => {
+                eprintln!("model download: {e}");
+                self.start_backend();
+            }
             UserEvent::Download(done, total) => {
                 self.status_text = format!("Downloading model… {:.1} / {:.1} GB", done as f64 / 1e9, total as f64 / 1e9);
             }
-            UserEvent::DownloadDone(Ok(())) => self.start_loading(),
+            UserEvent::DownloadDone(Ok(())) => self.start_backend(),
             UserEvent::Warmed(r) => {
                 if self.cfg.backend != Backend::Lambda {
                     return;

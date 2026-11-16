@@ -4,7 +4,7 @@
 # libraries into target/xwin-cache and accepts Microsoft's license for them), and ships it with
 #   - DirectML.dll: the prebuilt ONNX Runtime for Windows always links DirectML, and the
 #     copy in older Windows versions may be too old, so the redistributable goes next to the exe;
-#   - preset.json: serverless backend, no server URL or API key (see package-macos.sh);
+#   - preset.json: local backend, no server URL or API key (see package-macos.sh);
 #   - README-TH.txt: Thai install guide.
 # The exe also needs the Visual C++ runtime (msvcp140.dll), present on most PCs; the guide
 # links the installer.
@@ -39,7 +39,7 @@ cp "$DML_DIR/LICENSE.txt" "$STAGE/LICENSE-DirectML.txt"
 cp scripts/share/install-th-windows.txt "$STAGE/README-TH.txt"
 cat > "$STAGE/preset.json" <<'JSON'
 {
-  "backend": "lambda",
+  "backend": "local",
   "server_url": "",
   "api_key": "",
   "mixed_english": true,

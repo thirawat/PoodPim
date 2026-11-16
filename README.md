@@ -71,18 +71,19 @@ cargo build --release --no-default-features --features lambda --bin poodpim-lamb
 
 `package-macos.sh` builds a zip with PoodPim.app and a Thai install guide
 ([scripts/share/install-th.txt](scripts/share/install-th.txt)). The app carries
-`Contents/Resources/preset.json` (serverless backend, no server URL or API key), which
-becomes the recipient's config on first launch. The zips may be published, so give people
-the API URL and key separately (everyone shares one key): the first time they press the talk
-key the app asks for both, and asks for the key again if the server rejects it. To cut access, rotate the key
+`Contents/Resources/preset.json` (local backend, no server URL or API key), which
+becomes the recipient's config on first launch, so the app offers to download the model
+right away. The zips may be published, so to share a serverless backend give people the API
+URL and key separately (everyone shares one key; menu → Server URL & API key…); the app
+asks for the key again if the server rejects it. To cut access, rotate the key
 ([deploy/lambda/README.md](deploy/lambda/README.md)) and send people the new one.
 
 The app starts at login by default (menu → Start at login; a LaunchAgent in
 `~/Library/LaunchAgents/local.poodpim.app.plist` on macOS, the `HKCU\…\Run` registry key on
 Windows), pointing at wherever it was last started from.
 
-In Local mode without a downloaded model, choosing Local or pressing the talk key offers to
-download it (2.6 GB).
+In Local mode without a downloaded model, starting the app, choosing Local or pressing the
+talk key offers to download it (2.6 GB).
 The app is not notarized, so recipients open it once via System Settings › Privacy &
 Security › Open Anyway. Apple-silicon Macs only (arm64 build).
 
