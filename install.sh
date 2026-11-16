@@ -6,6 +6,10 @@
 # A given version, e.g. a release candidate:
 #   curl -fsSL https://raw.githubusercontent.com/thirawat/PoodPim/main/install.sh | POODPIM_VERSION=v1.0.1-rc.1 sh
 #
+# A local build, to test it the way users install it (no download; the signature is still
+# checked):
+#   POODPIM_ZIP=dist/PoodPim-1.0.2-mac.zip sh install.sh
+#
 # It downloads the release zip from GitHub, checks its SHA-256 and that the app is signed
 # with the PoodPim certificate, puts PoodPim.app in /Applications (or ~/Applications when
 # /Applications isn't writable), quits a running copy and opens the new one. Files that
@@ -38,7 +42,11 @@ if [ "$MAJOR" -lt 13 ] || { [ "$MAJOR" -eq 13 ] && [ "${MINOR:-0}" -lt 4 ]; }; t
 fi
 
 TAG=${POODPIM_VERSION:-}
-if [ -z "$TAG" ]; then
+if [ -n "${POODPIM_ZIP:-}" ]; then
+  [ -f "$POODPIM_ZIP" ] || fail "ไม่เจอไฟล์ $POODPIM_ZIP"
+  TAG=v$(basename "$POODPIM_ZIP" | sed -n 's/^PoodPim-\(.*\)-mac\.zip$/\1/p')
+  [ "$TAG" = v ] && TAG=v0-local
+elif [ -z "$TAG" ]; then
   # github.com/<repo>/releases/latest redirects to …/releases/tag/<newest stable tag>.
   TAG=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest") ||
     fail "ติดต่อ GitHub ไม่ได้ ตรวจการเชื่อมต่ออินเทอร์เน็ต"
@@ -75,9 +83,13 @@ cleanup() {
 trap cleanup EXIT
 
 say "กำลังดาวน์โหลด PoodPim ${VERSION}…"
-curl -fL --progress-bar -o "$TMP/$ZIP" "$URL/$ZIP" || fail "ดาวน์โหลด $ZIP ไม่ได้"
-curl -fsSL -o "$TMP/$ZIP.sha256" "$URL/$ZIP.sha256" || fail "ดาวน์โหลด checksum ไม่ได้"
-(cd "$TMP" && shasum -a 256 -c "$ZIP.sha256" >/dev/null) || fail "ไฟล์ที่ดาวน์โหลดเสียหาย (checksum ไม่ตรง)"
+if [ -n "${POODPIM_ZIP:-}" ]; then
+  cp "$POODPIM_ZIP" "$TMP/$ZIP"
+else
+  curl -fL --progress-bar -o "$TMP/$ZIP" "$URL/$ZIP" || fail "ดาวน์โหลด $ZIP ไม่ได้"
+  curl -fsSL -o "$TMP/$ZIP.sha256" "$URL/$ZIP.sha256" || fail "ดาวน์โหลด checksum ไม่ได้"
+  (cd "$TMP" && shasum -a 256 -c "$ZIP.sha256" >/dev/null) || fail "ไฟล์ที่ดาวน์โหลดเสียหาย (checksum ไม่ตรง)"
+fi
 
 mkdir -p "$STAGE"
 ditto -x -k "$TMP/$ZIP" "$STAGE"
