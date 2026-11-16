@@ -4,6 +4,7 @@
 //! desktop app lives behind the `desktop` feature; the Lambda server behind `lambda`.
 
 pub mod asr;
+pub mod corrections;
 pub mod audio;
 pub mod features;
 pub mod hotwords;

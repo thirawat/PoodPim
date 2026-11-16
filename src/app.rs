@@ -27,6 +27,7 @@ use crate::pipeline::{Outcome, Pipeline};
 use crate::overlay::{Overlay, Phase};
 use crate::platform::{self, HotkeyEvent, TALK_KEY_LABEL};
 use crate::segment::Segmenter;
+use crate::corrections::{self, Corrections};
 use crate::hotwords::{self, Hotwords};
 use crate::{inserter, model, update};
 
@@ -91,6 +92,7 @@ struct Ui {
     server_settings: MenuItem,
     mixed: CheckMenuItem,
     vocabulary: MenuItem,
+    corrections: MenuItem,
     restore: CheckMenuItem,
     autostart: CheckMenuItem,
     paste_last: MenuItem,
@@ -143,6 +145,9 @@ struct App {
     vocabulary: Arc<Hotwords>,
     vocabulary_header: Arc<String>,
     vocabulary_modified: Option<std::time::SystemTime>,
+    /// Replacements applied before pasting (corrections::user_file), reloaded when it changes.
+    corrections: Corrections,
+    corrections_modified: Option<std::time::SystemTime>,
     /// The smaller model is being downloaded / is ready to replace the loaded one.
     model_upgrading: bool,
     model_swap_pending: bool,
@@ -249,6 +254,8 @@ pub fn run() -> Result<()> {
         vocabulary: Arc::new(Hotwords::default()),
         vocabulary_header: Arc::new(String::new()),
         vocabulary_modified: None,
+        corrections: Corrections::default(),
+        corrections_modified: None,
         model_upgrading: false,
         model_swap_pending: false,
         remove_fp32_after_load: false,
@@ -322,6 +329,9 @@ pub fn run() -> Result<()> {
                     } else if id == ui.vocabulary.id() {
                         app.reload_vocabulary(); // creates the file on first use
                         platform::open_in_editor(&hotwords::user_file());
+                    } else if id == ui.corrections.id() {
+                        app.reload_vocabulary();
+                        platform::open_in_editor(&corrections::user_file());
                     } else if id == ui.mixed.id() {
                         app.cfg.mixed_english = ui.mixed.is_checked();
                         app.cfg.save();
@@ -374,6 +384,7 @@ fn build_ui(cfg: &Config) -> Ui {
     let server_settings = MenuItem::new("Server URL && API key…", true, None);
     let mixed = CheckMenuItem::new("Thai + English (mixed)", true, cfg.mixed_english, None);
     let vocabulary = MenuItem::new("My vocabulary…", true, None);
+    let corrections = MenuItem::new("Word corrections…", true, None);
     let restore = CheckMenuItem::new("Restore clipboard after paste", true, cfg.restore_clipboard, None);
     let autostart = CheckMenuItem::new("Start at login", true, cfg.start_at_login, None);
     let paste_last = MenuItem::new("Paste last transcript", false, None);
@@ -387,7 +398,7 @@ fn build_ui(cfg: &Config) -> Ui {
     let menu = Menu::new();
     let seps: Vec<PredefinedMenuItem> = (0..5).map(|_| PredefinedMenuItem::separator()).collect();
     menu.append_items(&[
-        &status, &permission, &seps[0], &local, &lambda, &server_settings, &seps[1], &mixed, &vocabulary, &restore, &autostart, &paste_last, &download,
+        &status, &permission, &seps[0], &local, &lambda, &server_settings, &seps[1], &mixed, &vocabulary, &corrections, &restore, &autostart, &paste_last, &download,
         &seps[2], &hint, &seps[3],
     ])
     .expect("menu");
@@ -405,7 +416,7 @@ fn build_ui(cfg: &Config) -> Ui {
         builder.with_icon(icon)
     };
     let tray = builder.build().expect("tray icon");
-    Ui { tray, status, local, lambda, server_settings, mixed, vocabulary, restore, autostart, paste_last, download, permission, check_update, uninstall, quit }
+    Ui { tray, status, local, lambda, server_settings, mixed, vocabulary, corrections, restore, autostart, paste_last, download, permission, check_update, uninstall, quit }
 }
 
 impl App {
@@ -683,9 +694,10 @@ impl App {
                     );
                 }
                 if !out.text.is_empty() {
-                    eprintln!("{:.1}s in {} segment(s): {}", out.audio_s, out.segments, said(&out.text));
-                    self.last_text = out.text.clone();
-                    self.paste(out.text);
+                    let text = self.corrections.apply(&out.text);
+                    eprintln!("{:.1}s in {} segment(s): {}", out.audio_s, out.segments, said(&text));
+                    self.last_text = text.clone();
+                    self.paste(text);
                     self.overlay.set(Phase::Done);
                 } else if !out.errors.is_empty() {
                     self.overlay.set(Phase::Failed);
@@ -825,16 +837,22 @@ impl App {
         });
     }
 
-    /// Reads the word list again if its file changed (it is edited in a text editor).
+    /// Reads the word list and the corrections again if their files changed (they are edited
+    /// in a text editor). Creates them on first use.
     fn reload_vocabulary(&mut self) {
         let modified = std::fs::metadata(hotwords::user_file()).and_then(|m| m.modified()).ok();
-        if modified.is_some() && modified == self.vocabulary_modified {
-            return;
+        if modified.is_none() || modified != self.vocabulary_modified {
+            let (text, modified) = hotwords::read_user_list();
+            self.vocabulary = Arc::new(Hotwords::new(&text));
+            self.vocabulary_header = Arc::new(hotwords::to_header(&text));
+            self.vocabulary_modified = modified;
         }
-        let (text, modified) = hotwords::read_user_list();
-        self.vocabulary = Arc::new(Hotwords::new(&text));
-        self.vocabulary_header = Arc::new(hotwords::to_header(&text));
-        self.vocabulary_modified = modified;
+        let modified = std::fs::metadata(corrections::user_file()).and_then(|m| m.modified()).ok();
+        if modified.is_none() || modified != self.corrections_modified {
+            let (text, modified) = corrections::read_user_list();
+            self.corrections = Corrections::new(&text);
+            self.corrections_modified = modified;
+        }
     }
 
     /// Shows "ready" once per launch: proof the app runs even when its menu-bar icon is hidden.

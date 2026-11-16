@@ -19,17 +19,11 @@ pub fn user_file() -> std::path::PathBuf {
 
 /// Reads the user's vocabulary, creating the file with the default list if it doesn't exist.
 /// Returns the list's text and when the file last changed (to reload it after edits).
+/// Files never edited follow a newer default (see `corrections::read_list_file`).
 pub fn read_user_list() -> (String, Option<std::time::SystemTime>) {
-    let path = user_file();
-    if !path.exists() {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(&path, DEFAULT_LIST);
-    }
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|_| DEFAULT_LIST.to_string());
-    let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-    (text, modified)
+    // The default list 1.0.2-rc.3 wrote, before a copy of the default was kept beside the file.
+    const RC3_DEFAULT: u64 = 0x295c_e535_d5c9_f14a;
+    crate::corrections::read_list_file(&user_file(), DEFAULT_LIST, &[RC3_DEFAULT])
 }
 
 /// The terms of a list, for sending to the server: one per line, comments dropped,
@@ -250,7 +244,7 @@ pub fn thai_acronyms_to_latin(text: &str) -> String {
     let mut out = text.to_string();
     for (thai, latin) in acronym_table() {
         if out.contains(thai.as_str()) {
-            out = out.replace(thai.as_str(), latin);
+            out = crate::corrections::replace(&out, thai, latin);
         }
     }
     out
@@ -293,6 +287,6 @@ mod tests {
     fn writes_hotwords_and_acronyms_the_usual_way() {
         let h = Hotwords::new("Nvidia\nOpenAI");
         assert_eq!(h.canonical_case("ซื้อ nvidia กับ openai ไม่ใช่ nvidiax"), "ซื้อ Nvidia กับ OpenAI ไม่ใช่ nvidiax");
-        assert_eq!(thai_acronyms_to_latin("ใช้จีพียูกับซีพียู ดีมาก"), "ใช้GPUกับCPU ดีมาก");
+        assert_eq!(thai_acronyms_to_latin("ใช้จีพียูกับซีพียู ดีมาก"), "ใช้ GPU กับ CPU ดีมาก");
     }
 }

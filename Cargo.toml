@@ -1,6 +1,6 @@
 [package]
 name = "poodpim"
-version = "1.0.2-rc.3"
+version = "1.0.2-rc.4"
 edition = "2024"
 license = "MIT"
 default-run = "poodpim"

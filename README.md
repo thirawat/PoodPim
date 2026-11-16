@@ -128,6 +128,16 @@ The model hears many English words in Thai speech but spells them by ear ("จ�
   The list is reloaded when the file changes, and sent to the serverless backend in the
   `x-poodpim-vocabulary` header. An empty list means plain greedy decoding.
 - **Acronyms.** Tech acronyms spelled in Thai are written in Latin ("จีพียู" → "GPU").
+- **Word corrections.** Words the model keeps hearing the same wrong way, or Thai spellings
+  someone wants in English, are replaced after decoding (menu → Word corrections…; lines
+  `heard, heard = wanted`; started from [assets/corrections.txt](assets/corrections.txt),
+  dev terms such as "เดฟออฟ, depop = DevOps"). Applied in the app, so it works with either
+  backend; longest match first; Latin words match whole words only; a Latin replacement
+  next to Thai letters gets a space.
+
+Both files start from the defaults, and a copy of the default is kept beside each
+(`*.txt.orig`): while a file is unedited it follows newer defaults, once edited it is left
+alone.
 
 On tools/asr-eval, against greedy fp32: CER 23.4% vs 25.5%, English words of the subtitles
 found 59% vs 39%; decoding took 1.8× as long, but with the int8 encoder the whole run used

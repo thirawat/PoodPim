@@ -19,11 +19,14 @@ const USAGE: &str = "poodpim — Thai push-to-talk dictation
 USAGE:
   poodpim                         start the tray / menu-bar app
   poodpim transcribe <wav>... [--thai-only] [--server] [--live] [--vocabulary FILE | --no-vocabulary]
+                               [--corrections FILE]
                                 --server: send to the configured Lambda instead of the local model
                                 --live:   feed the file in real time like the microphone and report
                                           the wait after release
                                 --vocabulary: word list to favour (default: the app's, see
                                           `poodpim config`); --no-vocabulary: plain decoding
+                                --corrections: replacements to apply to the text (the app uses
+                                          the user's corrections file; the CLI only this one)
   poodpim download [--check]      download the OpenThai ASR model (~1 GB)
   poodpim backend local|lambda    choose where speech is transcribed
   poodpim server <url>            set the Lambda Function URL; reads the API key from stdin
@@ -94,6 +97,7 @@ fn show_config(cfg: &Config) {
     println!("server_url: {}", if cfg.server_url.is_empty() { "(not set)" } else { &cfg.server_url });
     println!("api_key:    {key}");
     println!("vocabulary: {}", poodpim::hotwords::user_file().display());
+    println!("corrections: {}", poodpim::corrections::user_file().display());
 }
 
 fn transcribe(args: &[String]) -> Result<()> {
@@ -110,11 +114,15 @@ fn transcribe(args: &[String]) -> Result<()> {
     };
     let vocabulary = Arc::new(poodpim::hotwords::Hotwords::new(&vocab_text));
     let vocab_header = poodpim::hotwords::to_header(&vocab_text);
+    let fixes = match args.iter().position(|a| a == "--corrections").and_then(|i| args.get(i + 1)) {
+        Some(f) => poodpim::corrections::Corrections::new(&std::fs::read_to_string(f).map_err(|e| anyhow!("reading {f}: {e}"))?),
+        None => poodpim::corrections::Corrections::default(),
+    };
     // Everything that isn't a flag (or the file after --vocabulary) is an audio file.
     let mut files: Vec<PathBuf> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--vocabulary" {
+        if a == "--vocabulary" || a == "--corrections" {
             it.next();
         } else if !a.starts_with("--") {
             files.push(PathBuf::from(a));
@@ -179,7 +187,7 @@ fn transcribe(args: &[String]) -> Result<()> {
             out.segments,
             if live { "after release " } else { "" },
             wait.as_secs_f32(),
-            out.text
+            fixes.apply(&out.text)
         );
         for e in &out.errors {
             eprintln!("segment error: {e}");
