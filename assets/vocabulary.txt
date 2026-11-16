@@ -239,6 +239,9 @@ auto scale
 latency
 throughput
 performance
+optimize
+optimization
+keyword
 bottleneck
 memory
 storage

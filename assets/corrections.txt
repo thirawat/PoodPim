@@ -68,3 +68,6 @@ Roll Back = rollback
 ดาดาเบส = database
 ทำเอาท์ = timeout
 Unittest = unit test
+ออปติไมค์, ออปติไมซ์, อ็อปติไมซ์, ออฟติไมซ์, ออปติไมส์ = Optimize
+ออปติไมเซชัน, ออปติไมเซชั่น = optimization
+key เวิร์ด, คีย์เวิร์ด, คีย์เวิด, คีเวิร์ด = keyword
