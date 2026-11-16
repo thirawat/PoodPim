@@ -115,6 +115,21 @@ pub fn accessibility_trusted(prompt: bool) -> bool {
 
 pub const TALK_KEY_LABEL: &str = "Right ⌥";
 
+/// Where the app's log goes when it isn't started from a terminal.
+pub fn log_dir() -> Option<std::path::PathBuf> {
+    Some(dirs::home_dir()?.join("Library/Logs/PoodPim"))
+}
+
+/// Sends this process's standard error to `file`.
+pub fn redirect_stderr(file: std::fs::File) {
+    use std::os::fd::IntoRawFd;
+    unsafe extern "C" {
+        fn dup2(from: i32, to: i32) -> i32;
+    }
+    let fd = file.into_raw_fd();
+    unsafe { dup2(fd, 2) };
+}
+
 /// Shown when PoodPim is opened while it is already running.
 pub const ALREADY_RUNNING: &str = "PoodPim เปิดอยู่แล้ว\n\n\
 ไอคอนไมโครโฟน 🎙 อยู่ที่แถบเมนูด้านบนขวาของจอ ถ้าไม่เห็น อาจถูกรอยบากของจอบังไว้ \

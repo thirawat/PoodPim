@@ -1,8 +1,8 @@
 //! A small floating pill near the bottom of the screen that shows what dictation is doing:
 //! listening (bars follow the microphone level), transcribing, done.
 //!
-//! macOS: a non-activating NSPanel, so it never takes focus from the app being typed into
-//! and ignores the mouse. Other platforms: no overlay yet (the tray icon shows the state).
+//! macOS: a non-activating NSPanel. Windows: a borderless topmost tool window drawn with GDI.
+//! Either way it never takes focus from the app being typed into and ignores the mouse.
 
 use std::time::{Duration, Instant};
 
@@ -19,7 +19,6 @@ pub enum Phase {
     Failed,
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 impl Phase {
     fn label(&self) -> String {
         match self {
@@ -64,9 +63,13 @@ pub struct Overlay {
     since: Instant,
     level: f32,
     shown: f32,
-    #[cfg(target_os = "macos")]
-    view: Option<mac::View>,
+    view: Option<sys::View>,
 }
+
+#[cfg(target_os = "macos")]
+use mac as sys;
+#[cfg(windows)]
+use win as sys;
 
 const BARS: usize = 5;
 
@@ -83,7 +86,6 @@ impl Overlay {
             since: Instant::now(),
             level: 0.0,
             shown: 0.0,
-            #[cfg(target_os = "macos")]
             view: None,
         }
     }
@@ -94,17 +96,14 @@ impl Overlay {
         }
         self.phase = phase;
         self.since = Instant::now();
-        #[cfg(target_os = "macos")]
-        {
-            if self.view.is_none() && self.phase != Phase::Hidden {
-                self.view = mac::View::new();
-            }
-            if let Some(v) = &self.view {
-                if self.phase == Phase::Hidden {
-                    v.hide();
-                } else {
-                    v.show(&self.phase.label(), self.phase.rgb());
-                }
+        if self.view.is_none() && self.phase != Phase::Hidden {
+            self.view = sys::View::new();
+        }
+        if let Some(v) = &self.view {
+            if self.phase == Phase::Hidden {
+                v.hide();
+            } else {
+                v.show(&self.phase.label(), self.phase.rgb());
             }
         }
         self.tick();
@@ -143,11 +142,9 @@ impl Overlay {
                 _ => 0.15,
             };
         }
-        #[cfg(target_os = "macos")]
         if let Some(v) = &self.view {
             v.set_bars(&heights);
         }
-        let _ = heights;
         true
     }
 }
@@ -288,6 +285,258 @@ mod mac {
 
         pub fn hide(&self) {
             unsafe { self.panel.orderOut(None) };
+        }
+    }
+}
+
+/// Windows: a WS_POPUP tool window (no taskbar button), topmost, click-through, never
+/// activated, rounded with a window region and drawn with GDI into a back buffer.
+/// Created and used on the event-loop thread, whose message pump delivers WM_PAINT.
+#[cfg(windows)]
+mod win {
+    use std::cell::RefCell;
+
+    use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
+    use windows::Win32::Graphics::Gdi::{
+        BeginPaint, BitBlt, CLEARTYPE_QUALITY, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontIndirectW,
+        CreateRoundRectRgn, CreateSolidBrush, DEFAULT_CHARSET, DeleteDC, DeleteObject, EndPaint, FW_MEDIUM, FillRect,
+        GetDC, GetMonitorInfoW, GetTextExtentPoint32W, HFONT, InvalidateRect, LOGFONTW, MONITOR_DEFAULTTOPRIMARY,
+        MONITORINFO, MonitorFromWindow, PAINTSTRUCT, ReleaseDC, SRCCOPY, SelectObject, SetBkMode, SetTextColor,
+        SetWindowRgn, TRANSPARENT, TextOutW,
+    };
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, GetForegroundWindow, HTTRANSPARENT, HWND_TOPMOST, LWA_ALPHA, MA_NOACTIVATE,
+        RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetLayeredWindowAttributes, SetWindowPos,
+        ShowWindow, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_PAINT, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    };
+    use windows::core::w;
+
+    use super::BARS;
+
+    // In pixels at 100% scaling (96 DPI).
+    const H: f32 = 44.0;
+    const BAR_W: f32 = 4.0;
+    const BAR_GAP: f32 = 4.0;
+    const PAD: f32 = 18.0;
+    const GAP: f32 = 12.0;
+    const MAX_BAR_H: f32 = 24.0;
+    /// Distance from the bottom of the work area (above the taskbar).
+    const BOTTOM: f32 = 64.0;
+
+    /// What WM_PAINT draws (one overlay per app, on one thread). Sizes are in pixels at
+    /// `scale` (the monitor's DPI / 96: tao makes the process DPI-aware, so nothing is scaled
+    /// for us).
+    struct Look {
+        text: Vec<u16>,
+        rgb: [f64; 3],
+        bars: [f32; BARS],
+        width: i32,
+        scale: f32,
+        font: HFONT,
+    }
+
+    impl Look {
+        fn px(&self, v: f32) -> i32 {
+            (v * self.scale).round() as i32
+        }
+    }
+
+    fn make_font(scale: f32) -> HFONT {
+        // Leelawadee UI ships with Windows 10/11 and covers both Thai and Latin.
+        let mut lf = LOGFONTW {
+            lfHeight: -(18.0 * scale).round() as i32,
+            lfWeight: FW_MEDIUM.0 as i32,
+            lfCharSet: DEFAULT_CHARSET,
+            lfQuality: CLEARTYPE_QUALITY,
+            ..Default::default()
+        };
+        for (i, c) in "Leelawadee UI".encode_utf16().enumerate() {
+            lf.lfFaceName[i] = c;
+        }
+        unsafe { CreateFontIndirectW(&lf) }
+    }
+
+    thread_local! {
+        static LOOK: RefCell<Option<Look>> = const { RefCell::new(None) };
+    }
+
+    fn colorref(rgb: [f64; 3]) -> COLORREF {
+        let c = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+        COLORREF(c(rgb[0]) | (c(rgb[1]) << 8) | (c(rgb[2]) << 16))
+    }
+
+    pub struct View {
+        hwnd: HWND,
+    }
+
+    impl View {
+        pub fn new() -> Option<Self> {
+            unsafe {
+                let instance = GetModuleHandleW(None).ok()?;
+                let class = w!("PoodPimOverlay");
+                let wc = WNDCLASSEXW {
+                    cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                    lpfnWndProc: Some(wnd_proc),
+                    hInstance: instance.into(),
+                    lpszClassName: class,
+                    ..Default::default()
+                };
+                RegisterClassExW(&wc); // fails harmlessly if already registered
+                let hwnd = CreateWindowExW(
+                    WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
+                    class,
+                    w!("PoodPim"),
+                    WS_POPUP,
+                    0,
+                    0,
+                    200,
+                    H as i32,
+                    None,
+                    None,
+                    Some(instance.into()),
+                    None,
+                )
+                .ok()?;
+                let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 235, LWA_ALPHA);
+                let font = make_font(1.0);
+                LOOK.with(|l| {
+                    *l.borrow_mut() = Some(Look { text: Vec::new(), rgb: [1.0; 3], bars: [0.15; BARS], width: 200, scale: 1.0, font })
+                });
+                Some(Self { hwnd })
+            }
+        }
+
+        pub fn show(&self, text: &str, rgb: [f64; 3]) {
+            let text: Vec<u16> = text.encode_utf16().collect();
+            // The screen the user is working on: move there first, so the DPI read below is
+            // that monitor's.
+            let work = unsafe {
+                let monitor = MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY);
+                let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+                GetMonitorInfoW(monitor, &mut info).as_bool().then_some(info.rcWork)
+            };
+            if let Some(r) = work {
+                unsafe {
+                    let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), r.left, r.top, 1, 1, SWP_NOACTIVATE);
+                }
+            }
+            let scale = match unsafe { GetDpiForWindow(self.hwnd) } {
+                0 => 1.0,
+                dpi => dpi as f32 / 96.0,
+            };
+            let size = LOOK.with(|l| {
+                let mut l = l.borrow_mut();
+                let look = l.as_mut()?;
+                if (look.scale - scale).abs() > 0.01 {
+                    let old = std::mem::replace(&mut look.font, make_font(scale));
+                    unsafe {
+                        let _ = DeleteObject(old.into());
+                    }
+                    look.scale = scale;
+                }
+                let mut size = SIZE::default();
+                unsafe {
+                    let dc = GetDC(Some(self.hwnd));
+                    let old = SelectObject(dc, look.font.into());
+                    let _ = GetTextExtentPoint32W(dc, &text, &mut size);
+                    SelectObject(dc, old);
+                    ReleaseDC(Some(self.hwnd), dc);
+                }
+                let bars_w = BARS as f32 * BAR_W + (BARS - 1) as f32 * BAR_GAP;
+                look.width = look.px(PAD + bars_w + GAP + PAD) + size.cx;
+                look.text = text;
+                look.rgb = rgb;
+                Some((look.width, look.px(H), look.px(BOTTOM)))
+            });
+            let Some((w, h, bottom)) = size else { return };
+            unsafe {
+                // Bottom centre of that screen, above the taskbar.
+                let (x, y) = match work {
+                    Some(r) => (r.left + (r.right - r.left - w) / 2, r.bottom - bottom - h),
+                    None => (100, 100),
+                };
+                let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
+                let region = CreateRoundRectRgn(0, 0, w + 1, h + 1, h, h);
+                SetWindowRgn(self.hwnd, Some(region), true); // the window owns the region now
+                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                let _ = InvalidateRect(Some(self.hwnd), None, false);
+            }
+        }
+
+        /// Bar heights as fractions (0..1) of the maximum.
+        pub fn set_bars(&self, heights: &[f32; BARS]) {
+            LOOK.with(|l| {
+                if let Some(look) = l.borrow_mut().as_mut() {
+                    look.bars = *heights;
+                }
+            });
+            unsafe {
+                let _ = InvalidateRect(Some(self.hwnd), None, false);
+            }
+        }
+
+        pub fn hide(&self) {
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
+            }
+        }
+    }
+
+    unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        match msg {
+            WM_PAINT => {
+                unsafe { paint(hwnd) };
+                LRESULT(0)
+            }
+            WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
+            WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+            _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+        }
+    }
+
+    unsafe fn paint(hwnd: HWND) {
+        let mut ps = PAINTSTRUCT::default();
+        let dc = unsafe { BeginPaint(hwnd, &mut ps) };
+        LOOK.with(|l| {
+            let l = l.borrow();
+            let Some(look) = l.as_ref() else { return };
+            let (w, h) = (look.width, look.px(H));
+            unsafe {
+                // Draw into a back buffer, then copy: no flicker at 30 frames a second.
+                let mem = CreateCompatibleDC(Some(dc));
+                let bmp = CreateCompatibleBitmap(dc, w, h);
+                let old_bmp = SelectObject(mem, bmp.into());
+                let bg = CreateSolidBrush(colorref([0.11, 0.11, 0.12]));
+                FillRect(mem, &RECT { left: 0, top: 0, right: w, bottom: h }, bg);
+                let _ = DeleteObject(bg.into());
+                let bar = CreateSolidBrush(colorref(look.rgb));
+                let bar_w = look.px(BAR_W);
+                for (i, &level) in look.bars.iter().enumerate() {
+                    let bh = look.px(MAX_BAR_H * level).max(bar_w);
+                    let x = look.px(PAD + i as f32 * (BAR_W + BAR_GAP));
+                    let top = (h - bh) / 2;
+                    FillRect(mem, &RECT { left: x, top, right: x + bar_w, bottom: top + bh }, bar);
+                }
+                let _ = DeleteObject(bar.into());
+                let old_font = SelectObject(mem, look.font.into());
+                SetBkMode(mem, TRANSPARENT);
+                SetTextColor(mem, COLORREF(0x00FF_FFFF));
+                let mut size = SIZE::default();
+                let _ = GetTextExtentPoint32W(mem, &look.text, &mut size);
+                let bars_w = BARS as f32 * BAR_W + (BARS - 1) as f32 * BAR_GAP;
+                let _ = TextOutW(mem, look.px(PAD + bars_w + GAP), (h - size.cy) / 2, &look.text);
+                SelectObject(mem, old_font);
+                let _ = BitBlt(dc, 0, 0, w, h, Some(mem), 0, 0, SRCCOPY);
+                SelectObject(mem, old_bmp);
+                let _ = DeleteObject(bmp.into());
+                let _ = DeleteDC(mem);
+            }
+        });
+        unsafe {
+            let _ = EndPaint(hwnd, &ps);
         }
     }
 }

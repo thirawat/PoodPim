@@ -1,5 +1,4 @@
 //! Windows: low-level keyboard hook for Right Alt / Esc, SendInput for Ctrl+V.
-//! Not yet tested on a Windows machine.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -126,6 +125,22 @@ pub fn open_permission_settings() {}
 /// Asks for the API key. None if cancelled or left empty.
 pub fn ask_api_key(message: &str) -> Option<String> {
     input_box(message, "")
+}
+
+/// Where the app's log goes (a GUI app on Windows has no console to print to).
+pub fn log_dir() -> Option<std::path::PathBuf> {
+    Some(dirs::data_local_dir()?.join("poodpim").join("logs"))
+}
+
+/// Sends this process's standard error to `file` (Rust looks the handle up on every write).
+pub fn redirect_stderr(file: std::fs::File) {
+    use std::os::windows::io::IntoRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::{STD_ERROR_HANDLE, SetStdHandle};
+    let handle = HANDLE(file.into_raw_handle());
+    unsafe {
+        let _ = SetStdHandle(STD_ERROR_HANDLE, handle);
+    }
 }
 
 /// Shown when PoodPim is opened while it is already running.

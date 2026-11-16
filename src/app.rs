@@ -43,7 +43,9 @@ const UPDATE_FIRST_CHECK: Duration = Duration::from_secs(20);
 const UPDATE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 enum UserEvent {
-    Hotkey(HotkeyEvent),
+    /// A key event and when it happened (stamped on the keyboard thread: the event loop may be
+    /// busy, e.g. starting the microphone, and must not mistake a hold for a tap).
+    Hotkey(HotkeyEvent, Instant),
     Menu(MenuEvent),
     ModelLoaded(u64, Result<Arc<Mutex<OpenThaiAsr>>, String>),
     Transcribed(u64, Outcome),
@@ -142,7 +144,29 @@ fn single_instance() -> Option<std::fs::File> {
     }
 }
 
+/// Started from Finder / the Start menu, standard error goes nowhere: keep it in a file
+/// (replaced on each launch) so problems on someone else's computer can be looked into.
+fn log_to_file() {
+    use std::io::IsTerminal;
+    if std::io::stderr().is_terminal() {
+        return;
+    }
+    let Some(dir) = platform::log_dir() else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(file) = std::fs::File::create(dir.join("poodpim.log")) {
+        platform::redirect_stderr(file);
+    }
+}
+
+/// What was said, for the terminal only: the log file must not collect people's dictation.
+pub(crate) fn said(text: &str) -> &str {
+    use std::io::IsTerminal;
+    if std::io::stderr().is_terminal() { text } else { "(text not logged)" }
+}
+
 pub fn run() -> Result<()> {
+    log_to_file();
+    eprintln!("PoodPim {} ({} {})", update::CURRENT, std::env::consts::OS, std::env::consts::ARCH);
     let Some(instance_lock) = single_instance() else {
         // Opened again while running (often because the menu-bar icon is hidden): say so.
         platform::alert(platform::ALREADY_RUNNING);
@@ -208,12 +232,13 @@ pub fn run() -> Result<()> {
                 ui = Some(build_ui(&app.cfg));
                 let p = proxy.clone();
                 platform::spawn_hotkey_listener(Box::new(move |e| {
-                    let _ = p.send_event(UserEvent::Hotkey(e));
+                    let _ = p.send_event(UserEvent::Hotkey(e, Instant::now()));
                 }));
                 if !platform::accessibility_trusted(true) {
                     eprintln!("Accessibility permission is needed: System Settings › Privacy & Security › Accessibility");
                 }
                 app.apply_autostart();
+                Recorder::warm_up();
                 app.start_backend();
                 // First launch in Local mode: ask about the model now, not on the first key press.
                 if app.state == State::NeedsModel {
@@ -503,7 +528,7 @@ impl App {
 
     fn handle(&mut self, ev: UserEvent) {
         match ev {
-            UserEvent::Hotkey(h) => self.on_hotkey(h),
+            UserEvent::Hotkey(h, at) => self.on_hotkey(h, at),
             UserEvent::ModelLoaded(generation, r) => {
                 if generation != self.load_gen || self.cfg.backend != Backend::Local {
                     return; // the user switched backend while it was loading
@@ -605,7 +630,7 @@ impl App {
                     );
                 }
                 if !out.text.is_empty() {
-                    eprintln!("{:.1}s in {} segment(s): {}", out.audio_s, out.segments, out.text);
+                    eprintln!("{:.1}s in {} segment(s): {}", out.audio_s, out.segments, said(&out.text));
                     self.last_text = out.text.clone();
                     self.paste(out.text);
                     self.overlay.set(Phase::Done);
@@ -724,7 +749,7 @@ impl App {
         self.status_text = format!("Error: {}", e.chars().take(80).collect::<String>());
     }
 
-    fn on_hotkey(&mut self, h: HotkeyEvent) {
+    fn on_hotkey(&mut self, h: HotkeyEvent, at: Instant) {
         match h {
             HotkeyEvent::TalkDown => {
                 // Not set up yet: ask for what's missing instead of recording.
@@ -748,9 +773,14 @@ impl App {
                     self.handsfree = false;
                     self.finish();
                 } else if self.state == State::Idle {
+                    let started = Instant::now();
                     match self.recorder.start() {
                         Ok(()) => {
-                            self.pressed_at = Instant::now();
+                            // From the key press, not from now: opening the microphone can take
+                            // a second or more (Windows, Bluetooth headsets), and timing from here
+                            // turned short holds into taps (hands-free mode).
+                            self.pressed_at = at;
+                            eprintln!("microphone started in {} ms", started.elapsed().as_millis());
                             self.state = State::Recording;
                             self.status_text = "Listening…".into();
                             eprintln!("listening");
@@ -767,7 +797,9 @@ impl App {
             }
             HotkeyEvent::TalkUp => {
                 if self.state == State::Recording && !self.handsfree {
-                    if self.pressed_at.elapsed() < TAP {
+                    let held = at.saturating_duration_since(self.pressed_at);
+                    eprintln!("talk key held {} ms", held.as_millis());
+                    if held < TAP {
                         self.handsfree = true;
                         self.status_text = format!("Listening… (tap {TALK_KEY_LABEL} to finish)");
                         self.overlay.set(Phase::Listening { handsfree: true });
@@ -863,6 +895,7 @@ impl App {
     fn finish(&mut self) {
         let raw = self.recorder.stop_raw();
         let rate = self.recorder.rate();
+        eprintln!("recorded {:.2}s at {rate} Hz", raw.len() as f64 / rate.max(1) as f64);
         let (Some(seg), Some(mut pipe)) = (self.segmenter.take(), self.pipeline.take()) else {
             self.state = State::Idle;
             self.overlay.set(Phase::Hidden);

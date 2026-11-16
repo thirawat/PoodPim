@@ -53,6 +53,33 @@ impl Recorder {
         Ok(())
     }
 
+    /// Opens the default microphone briefly on a background thread and closes it again. The
+    /// first time a process opens it can take seconds (2.7 s measured on a Mac), long enough
+    /// to lose the first words or a whole short phrase; afterwards it takes tens of ms.
+    pub fn warm_up() {
+        std::thread::spawn(|| {
+            let t0 = std::time::Instant::now();
+            let r = (|| -> Result<()> {
+                let device = cpal::default_host().default_input_device().ok_or_else(|| anyhow!("no microphone found"))?;
+                let supported = device.default_input_config().context("microphone config")?;
+                let stream = match supported.sample_format() {
+                    cpal::SampleFormat::F32 => build::<f32>(&device, supported.config(), 1, Arc::new(Mutex::new(Vec::new())))?,
+                    cpal::SampleFormat::I16 => build::<i16>(&device, supported.config(), 1, Arc::new(Mutex::new(Vec::new())))?,
+                    cpal::SampleFormat::I32 => build::<i32>(&device, supported.config(), 1, Arc::new(Mutex::new(Vec::new())))?,
+                    cpal::SampleFormat::U16 => build::<u16>(&device, supported.config(), 1, Arc::new(Mutex::new(Vec::new())))?,
+                    f => return Err(anyhow!("unsupported microphone sample format {f:?}")),
+                };
+                stream.play()?;
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                Ok(())
+            })();
+            match r {
+                Ok(()) => eprintln!("microphone warmed up in {} ms", t0.elapsed().as_millis()),
+                Err(e) => eprintln!("microphone warm-up: {e:#}"),
+            }
+        });
+    }
+
     /// The microphone's sample rate (the buffer is mono at this rate).
     pub fn rate(&self) -> u32 {
         self.rate

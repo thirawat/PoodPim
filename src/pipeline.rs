@@ -4,6 +4,7 @@
 //! keeps every request on the same warm Lambda instance (a second request in flight would
 //! start a new, cold one).
 
+use std::io::IsTerminal;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
@@ -63,7 +64,9 @@ impl Pipeline {
                     let r = transcribe(audio).or_else(|_| transcribe(audio));
                     match r {
                         Ok(t) => {
-                            eprintln!("segment {}: {secs:.1}s → {:.2}s: {t}", out.segments + 1, t0.elapsed().as_secs_f32());
+                            // The text only on a terminal: the app's log file must not collect dictation.
+                            let shown = if std::io::stderr().is_terminal() { t.as_str() } else { "(text not logged)" };
+                            eprintln!("segment {}: {secs:.1}s → {:.2}s: {shown}", out.segments + 1, t0.elapsed().as_secs_f32());
                             if !t.trim().is_empty() {
                                 parts.push(t.trim().to_string());
                             }

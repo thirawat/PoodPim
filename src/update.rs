@@ -125,10 +125,7 @@ pub fn start_uninstall(delete_model: bool) -> Result<()> {
 /// `POODPIM_APP` tells it which installed copy to work on.
 fn run_script(place: &std::path::Path, name: &str, args: &[&str], env: &[(&str, &str)], log: &str) -> Result<()> {
     let script = place.join(script_path(name));
-    #[cfg(target_os = "macos")]
-    let logs = dirs::home_dir().ok_or_else(|| anyhow!("no home folder"))?.join("Library/Logs/PoodPim");
-    #[cfg(windows)]
-    let logs = dirs::data_local_dir().ok_or_else(|| anyhow!("no local data folder"))?.join("poodpim").join("logs");
+    let logs = crate::platform::log_dir().ok_or_else(|| anyhow!("no folder for logs"))?;
     std::fs::create_dir_all(&logs)?;
     let out = std::fs::File::create(logs.join(log))?;
     #[cfg(target_os = "macos")]
