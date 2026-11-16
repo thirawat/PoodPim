@@ -200,7 +200,11 @@ Spokenly code or assets are used.
 
 ## Licences
 
-OpenThai2.0-ASR-Streaming: OpenMDW-1.1 (see `LICENSE` in the model folder).
+PoodPim (this code, the logo and the demo): [MIT](LICENSE).
+
+The speech model is not part of this repository: the app downloads
+OpenThai2.0-ASR-Streaming from Hugging Face, under its own licence, OpenMDW-1.1 (see
+`LICENSE` in the model folder).
 
 The logo and demo are drawn from [assets/logo.svg](assets/logo.svg) and
 [assets/demo/scene.html](assets/demo/scene.html): `scripts/make-icons.sh` rebuilds the app

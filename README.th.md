@@ -129,4 +129,9 @@ irm https://raw.githubusercontent.com/thirawat/PoodPim/main/install.ps1 | iex
 ## ขอบคุณ
 
 ถอดเสียงด้วยโมเดล [OpenThai2.0-ASR-Streaming](https://huggingface.co/iapp/OpenThai2.0-ASR-Streaming-ONNX)
-ของ iApp Technology ในโครงการ OpenThai ที่เปิดให้ใช้ฟรี ภายใต้สัญญาอนุญาต OpenMDW-1.1
+ของ iApp Technology ในโครงการ OpenThai ที่เปิดให้ใช้ฟรี
+
+## สัญญาอนุญาต
+
+- **โค้ด โลโก้ และภาพตัวอย่างของ PoodPim:** [MIT](LICENSE) นำไปใช้ แก้ไข หรือแจกต่อได้ รวมถึงใช้เชิงพาณิชย์ ขอแค่คงข้อความลิขสิทธิ์ไว้
+- **โมเดลถอดเสียง:** ไม่ได้อยู่ใน repo นี้ แอปดาวน์โหลดจาก Hugging Face และใช้สัญญาอนุญาตของโมเดลเอง คือ OpenMDW-1.1
