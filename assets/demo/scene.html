@@ -1,0 +1,236 @@
+<!doctype html>
+<!--
+  The README demo (assets/demo.gif), drawn frame by frame: render(t) shows the scene at t
+  seconds, and scripts/make-demo.sh captures it with headless Chrome. Mirrors the real app:
+  the pill's size, colours and bar formulas come from src/overlay.rs, the menu-bar mic turns
+  red while recording, the transcript is the app's actual output for tests/audio/th1.wav, and
+  it appears at once because the app pastes it.
+-->
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #E8EEF6;
+    --muted: #8A9BB4;
+    --teal: #2EE6C9;
+    --pill: rgba(28, 28, 31, 0.92);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 960px; height: 540px; overflow: hidden; }
+  body {
+    font-family: "IBM Plex Sans Thai", "Sukhumvit Set", "Thonburi", sans-serif;
+    color: var(--ink);
+    background:
+      radial-gradient(620px 420px at 12% 0%, rgba(46, 230, 201, 0.22), transparent 70%),
+      radial-gradient(700px 480px at 100% 100%, rgba(79, 70, 229, 0.28), transparent 70%),
+      linear-gradient(160deg, #0B1626 0%, #0A1020 100%);
+    position: relative;
+  }
+
+  /* menu bar */
+  .menubar {
+    position: absolute; inset: 0 0 auto 0; height: 30px;
+    background: rgba(255, 255, 255, 0.07);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    display: flex; align-items: center; justify-content: flex-end; gap: 16px; padding: 0 18px;
+    font-size: 13px; color: rgba(232, 238, 246, 0.82);
+  }
+  .menubar .dot { width: 15px; height: 10px; border-radius: 3px; background: rgba(255,255,255,0.28); }
+  .menubar .mic { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 6px; }
+  .menubar .mic.on { background: rgba(229, 57, 53, 0.18); }
+  .menubar .mic svg { width: 16px; height: 16px; }
+
+  /* the app being typed into */
+  .window {
+    position: absolute; left: 170px; top: 62px; width: 620px; height: 262px;
+    background: #FBFBFD; color: #1D2433; border-radius: 14px;
+    box-shadow: 0 30px 70px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.06);
+    overflow: hidden;
+  }
+  .titlebar {
+    height: 40px; display: flex; align-items: center; padding: 0 16px; gap: 8px;
+    background: #F1F3F7; border-bottom: 1px solid #E3E7EE; position: relative;
+  }
+  .titlebar i { width: 12px; height: 12px; border-radius: 50%; background: #D3D8E1; display: block; }
+  .titlebar span { position: absolute; left: 0; right: 0; text-align: center; font-size: 14px; color: #6B7487; font-weight: 500; }
+  .doc { padding: 22px 30px; font-size: 21px; line-height: 1.65; }
+  .doc h3 { font-size: 15px; font-weight: 600; color: #8A93A6; letter-spacing: 0.02em; margin-bottom: 6px; }
+  .caret { display: inline-block; width: 2px; height: 1.15em; background: #2563EB; vertical-align: -0.2em; margin-left: 1px; }
+  .typed { background: transparent; border-radius: 4px; }
+  .typed.flash { background: rgba(46, 230, 201, 0.22); }
+
+  /* what is being said */
+  .speech {
+    position: absolute; left: 50%; top: 346px; transform: translateX(-50%);
+    width: 760px; text-align: center; font-size: 20px; font-weight: 500;
+  }
+  .speech .who { color: var(--teal); font-weight: 600; margin-right: 10px; font-size: 15px; letter-spacing: 0.04em; }
+  .speech .said { color: #FFFFFF; }
+  .speech .unsaid { color: rgba(232, 238, 246, 0.18); }
+
+  /* the overlay pill (src/overlay.rs) */
+  .pill {
+    position: absolute; left: 50%; top: 446px; height: 44px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 12px; padding: 0 18px;
+    background: var(--pill); border-radius: 22px; white-space: nowrap;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.07);
+    font-size: 14px; font-weight: 500; color: #FFFFFF;
+  }
+  .bars { display: flex; align-items: center; gap: 3.5px; height: 24px; }
+  .bars b { width: 4px; border-radius: 2px; display: block; }
+
+  /* the key */
+  .key {
+    position: absolute; left: 44px; top: 430px; width: 132px; height: 66px; border-radius: 14px;
+    background: linear-gradient(180deg, #2A3448, #1E2636);
+    box-shadow: 0 6px 0 #121826, 0 12px 24px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+    display: flex; flex-direction: column; justify-content: center; padding: 0 14px;
+  }
+  .key .sym { font-size: 22px; line-height: 1; color: #FFFFFF; }
+  .key .name { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .key.down {
+    transform: translateY(5px);
+    box-shadow: 0 1px 0 #121826, 0 6px 14px rgba(0, 0, 0, 0.4), 0 0 0 3px rgba(46, 230, 201, 0.55), 0 0 26px rgba(46, 230, 201, 0.35);
+  }
+
+  .keynote { position: absolute; left: 44px; top: 510px; width: 132px; text-align: center; font-size: 12px; color: var(--muted); }
+
+  /* steps */
+  .steps { position: absolute; right: 40px; top: 436px; display: flex; flex-direction: column; gap: 6px; }
+  .step { display: flex; align-items: center; gap: 10px; font-size: 15px; color: rgba(232, 238, 246, 0.35); font-weight: 500; }
+  .step em { font-style: normal; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; background: rgba(255,255,255,0.08); }
+  .step.on { color: #FFFFFF; }
+  .step.on em { background: var(--teal); color: #052A26; }
+  .step.done { color: rgba(232, 238, 246, 0.6); }
+  .step.done em { background: rgba(46, 230, 201, 0.35); color: #052A26; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+  <div class="menubar">
+    <div class="dot"></div><div class="dot"></div>
+    <div class="mic" id="mic">
+      <svg viewBox="0 0 36 36"><g id="micg" fill="#FFFFFF">
+        <rect x="13.3" y="4.2" width="9.4" height="16" rx="4.7"/>
+        <path d="M8.7 16.6v.6a9.3 9.3 0 0 0 18.6 0v-.6" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" id="micring"/>
+        <rect x="16.75" y="25.6" width="2.5" height="5.4" rx="1"/>
+        <rect x="11.2" y="29.7" width="13.6" height="2.5" rx="1.2"/>
+      </g></svg>
+    </div>
+    <span>09:41</span>
+  </div>
+
+  <div class="window">
+    <div class="titlebar"><i></i><i></i><i></i><span>โน้ต</span></div>
+    <div class="doc">
+      <h3>โน้ตด่วน</h3>
+      <div><span class="typed" id="typed"></span><span class="caret" id="caret"></span></div>
+    </div>
+  </div>
+
+  <div class="speech" id="speech"><span class="who">พูดว่า</span><span class="said" id="said"></span><span class="unsaid" id="unsaid"></span></div>
+
+  <div class="pill" id="pill"><div class="bars" id="bars"><b></b><b></b><b></b><b></b><b></b></div><span id="label"></span></div>
+
+  <div class="key" id="key"><div class="sym">⌥</div><div class="name">Option ขวา</div></div>
+  <div class="keynote">Windows: Alt ขวา</div>
+
+  <div class="steps">
+    <div class="step" id="s1"><em>1</em>กดค้าง</div>
+    <div class="step" id="s2"><em>2</em>พูดไทย</div>
+    <div class="step" id="s3"><em>3</em>ปล่อย → พิมพ์ให้เลย</div>
+  </div>
+
+<script>
+  // Timeline (seconds). One loop lasts DURATION.
+  const DURATION = 8.6;
+  const DOWN = 0.9, UP = 4.6, PASTE = 5.35, PILL_GONE = 6.4;
+  const SPOKEN = "สวัสดีครับ วันนี้อากาศดีมาก ผมอยากทดสอบระบบถอดเสียงภาษาไทย";
+  // The app's output for tests/audio/th1.wav (no spaces: that is how the model writes it).
+  const TYPED = "สวัสดีครับวันนี้อากาศดีมากผมอยากทดสอบระบบถอดเสียงภาษาไทย";
+  const words = [...new Intl.Segmenter("th", { granularity: "word" }).segment(SPOKEN)].map(s => s.segment);
+
+  const RED = [255, 69, 59], AMBER = [255, 179, 64], GREEN = [51, 214, 74];
+  const css = c => `rgb(${c[0]},${c[1]},${c[2]})`;
+  const $ = id => document.getElementById(id);
+
+  // A speech-like microphone level (0..1): syllables at ~5 Hz, phrase pauses.
+  function level(t) {
+    const s = t - DOWN - 0.25;
+    if (s < 0 || t > UP - 0.2) return 0.05;
+    const syll = Math.abs(Math.sin(s * 15.7)) * (0.7 + 0.3 * Math.sin(s * 4.1 + 1));
+    const phrase = 0.55 + 0.45 * Math.max(0, Math.sin(s * 2.1 + 0.9));
+    return Math.min(1, 0.3 + 0.7 * syll * phrase);
+  }
+
+  // Bar heights as in src/overlay.rs (fraction of 24 px, at least the bar width).
+  function bars(t, phase) {
+    const SHAPE = [0.55, 0.8, 1.0, 0.8, 0.55];
+    const since = t - (phase === "listen" ? DOWN : phase === "work" ? UP : PASTE);
+    return SHAPE.map((shape, i) => {
+      if (phase === "listen") {
+        const wobble = 0.75 + 0.25 * Math.sin(since * 9 + i * 1.3);
+        return 0.12 + 0.88 * level(t) * shape * wobble;
+      }
+      if (phase === "work") return 0.15 + 0.45 * (0.5 + 0.5 * Math.sin(since * 6 - i * 0.9));
+      return 0.15;
+    });
+  }
+
+  window.render = function (t) {
+    t = ((t % DURATION) + DURATION) % DURATION;
+    const holding = t >= DOWN && t < UP;
+    const phase = t < DOWN ? "idle" : t < UP ? "listen" : t < PASTE ? "work" : t < PILL_GONE ? "done" : "idle";
+    const pasted = t >= PASTE;
+
+    $("key").classList.toggle("down", holding);
+    $("mic").classList.toggle("on", holding);
+    $("micg").setAttribute("fill", holding ? "#E53935" : "#FFFFFF");
+    $("micring").setAttribute("stroke", holding ? "#E53935" : "#FFFFFF");
+
+    // speech subtitle: words light up while the key is held
+    const speaking = t >= DOWN + 0.25 && t < UP + 0.6;
+    $("speech").classList.toggle("hidden", !speaking);
+    const progress = Math.max(0, Math.min(1, (t - DOWN - 0.3) / (UP - DOWN - 0.6)));
+    const total = SPOKEN.length;
+    let said = "", shown = 0;
+    for (const w of words) {
+      if (shown + w.length <= progress * total + 0.5) { said += w; shown += w.length; } else break;
+    }
+    $("said").textContent = said;
+    $("unsaid").textContent = SPOKEN.slice(said.length);
+
+    // pill
+    const pill = $("pill");
+    pill.classList.toggle("hidden", phase === "idle");
+    if (phase !== "idle") {
+      const rgb = phase === "listen" ? RED : phase === "work" ? AMBER : GREEN;
+      $("label").textContent = phase === "listen" ? "กำลังฟัง…" : phase === "work" ? "กำลังถอดเสียง…" : "✓ พิมพ์แล้ว";
+      const hs = bars(t, phase);
+      [...$("bars").children].forEach((b, i) => {
+        b.style.height = Math.max(4, 24 * hs[i]) + "px";
+        b.style.background = css(rgb);
+      });
+    }
+
+    // the document
+    $("typed").textContent = pasted ? TYPED : "";
+    $("typed").classList.toggle("flash", pasted && t < PASTE + 0.45);
+    const blink = Math.floor(t * 2) % 2 === 0;
+    $("caret").style.visibility = blink || holding || phase === "work" ? "visible" : "hidden";
+
+    // steps
+    const step = t < DOWN ? 0 : t < DOWN + 0.6 ? 1 : t < UP ? 2 : t < PILL_GONE ? 3 : 4;
+    ["s1", "s2", "s3"].forEach((id, i) => {
+      $(id).classList.toggle("on", step === i + 1);
+      $(id).classList.toggle("done", step > i + 1 && step < 4);
+    });
+  };
+  window.DURATION = DURATION;
+  render(0);
+</script>
+</body>
+</html>

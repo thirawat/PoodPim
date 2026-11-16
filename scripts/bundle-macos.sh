@@ -18,7 +18,7 @@ cargo build --release
 rm -rf "$APP"
 mkdir -p "$(dirname "$APP")" "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp target/release/poodpim "$APP/Contents/MacOS/poodpim"
-python3 scripts/make_icon.py "$APP/Contents/Resources/AppIcon.icns"
+cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns" # from assets/logo.svg (scripts/make-icons.sh)
 # The installer and uninstaller, which the app runs to update or remove itself.
 cp install.sh uninstall.sh "$APP/Contents/Resources/"
 if [ -n "${POODPIM_PRESET:-}" ]; then

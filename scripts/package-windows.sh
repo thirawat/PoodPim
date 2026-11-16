@@ -40,6 +40,7 @@ cp "$DML_DIR/bin/x64-win/DirectML.dll" "$STAGE/"
 cp "$DML_DIR/LICENSE.txt" "$STAGE/LICENSE-DirectML.txt"
 cp scripts/share/install-th-windows.txt "$STAGE/README-TH.txt"
 cp install.ps1 uninstall.ps1 "$STAGE/"
+cp assets/PoodPim.ico "$STAGE/" # Start menu shortcut and Settings > Apps icon (install.ps1)
 cat > "$STAGE/preset.json" <<'JSON'
 {
   "backend": "local",

@@ -1,11 +1,32 @@
-# PoodPim (พูดพิมพ์) — Thai push-to-talk dictation (macOS · Windows)
+<p align="center">
+  <img src="assets/logo.svg" width="128" height="128" alt="PoodPim logo: a speech bubble whose sound wave ends in a text cursor">
+</p>
 
-<a href="https://openthai.ai/openthai2p0-asr-streaming?ref=powered-by" target="_blank" rel="noopener"><img src="https://openthai.ai/img/badges/powered-by-openthai-asr.svg?v=2" alt="Powered by OpenThai ASR" height="32"></a>
+<h1 align="center">PoodPim · พูดพิมพ์</h1>
+
+<p align="center">
+  <b>Hold a key, speak Thai, let go: the text is typed wherever your cursor is, in any app.</b><br>
+  macOS · Windows · speech recognition on your own computer · free and open source
+</p>
+
+<p align="center">
+  <a href="README.th.md">ภาษาไทย</a> · <b>English</b>
+</p>
+
+<p align="center">
+  <a href="https://github.com/thirawat/PoodPim/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/thirawat/PoodPim?color=0FA3A0&label=release"></a>
+  <img alt="macOS 13.4+ (Apple silicon) and Windows 10/11" src="https://img.shields.io/badge/macOS%2013.4%2B%20%C2%B7%20Windows%2010%2F11-0B4F72">
+  <a href="https://openthai.ai/openthai2p0-asr-streaming?ref=powered-by"><img src="https://openthai.ai/img/badges/powered-by-openthai-asr.svg?v=2" alt="Powered by OpenThai ASR" height="20"></a>
+</p>
+
+<p align="center">
+  <img src="assets/demo.gif" width="720" alt="Demo: holding Right Option shows a 'listening' pill while the user says a Thai sentence; on release the pill turns to 'transcribing', then the sentence appears in a notes window">
+</p>
 
 Hold a key, speak Thai (or Thai mixed with English), let go, and the text is typed where
-your cursor is — in any app. Speech recognition runs locally on the CPU with
+your cursor is. Speech recognition runs locally on the CPU with
 [iapp/OpenThai2.0-ASR-Streaming-ONNX](https://huggingface.co/iapp/OpenThai2.0-ASR-Streaming-ONNX)
-(640M-parameter FastConformer + RNN-T, fp32).
+(640M-parameter FastConformer + RNN-T, fp32), or on your own AWS Lambda.
 
 Written in Rust: one ~22 MB binary, ONNX Runtime linked in statically.
 
@@ -122,7 +143,8 @@ Windows: `package-windows.sh` cross-compiles from macOS with
 [cargo-xwin](https://github.com/rust-cross/cargo-xwin) (`cargo install --locked cargo-xwin`;
 MSVC/SDK libraries are cached in `target/xwin-cache`), or build on Windows with the MSVC
 toolchain (`cargo build --release`). The zip ships `DirectML.dll` next to the exe (the prebuilt
-ONNX Runtime for Windows always links it) and needs the Visual C++ runtime on the PC. The
+ONNX Runtime for Windows always links it) and needs the Visual C++ runtime on the PC.
+
 On Windows, PoodPim takes Right Alt for itself: other apps never see it, because an Alt
 pressed and released on its own opens the focused app's menu (Office KeyTips). Left Alt is
 unaffected; on keyboard layouts that type with AltGr (Right Alt), AltGr is unavailable while
@@ -179,3 +201,7 @@ Spokenly code or assets are used.
 ## Licences
 
 OpenThai2.0-ASR-Streaming: OpenMDW-1.1 (see `LICENSE` in the model folder).
+
+The logo and demo are drawn from [assets/logo.svg](assets/logo.svg) and
+[assets/demo/scene.html](assets/demo/scene.html): `scripts/make-icons.sh` rebuilds the app
+icons, `scripts/make-demo.sh` the demo GIF.

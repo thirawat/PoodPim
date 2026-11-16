@@ -87,6 +87,8 @@ try {
     $Shortcut = $Shell.CreateShortcut($Lnk)
     $Shortcut.TargetPath = $Exe
     $Shortcut.WorkingDirectory = $Dir
+    $Ico = Join-Path $Dir 'PoodPim.ico'
+    if (Test-Path $Ico) { $Shortcut.IconLocation = "$Ico,0" }
     $Shortcut.Description = 'PoodPim: Thai dictation'
     $Shortcut.Save()
 
@@ -98,7 +100,7 @@ try {
         DisplayName     = 'PoodPim'
         DisplayVersion  = $Version
         Publisher       = 'PoodPim'
-        DisplayIcon     = $Exe
+        DisplayIcon     = $(if (Test-Path (Join-Path $Dir 'PoodPim.ico')) { Join-Path $Dir 'PoodPim.ico' } else { $Exe })
         InstallLocation = $Dir
         URLInfoAbout    = "https://github.com/$Repo"
         UninstallString = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$Dir\uninstall.ps1`""
