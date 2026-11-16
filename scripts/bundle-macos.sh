@@ -19,6 +19,8 @@ rm -rf "$APP"
 mkdir -p "$(dirname "$APP")" "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp target/release/poodpim "$APP/Contents/MacOS/poodpim"
 python3 scripts/make_icon.py "$APP/Contents/Resources/AppIcon.icns"
+# The installer and uninstaller, which the app runs to update or remove itself.
+cp install.sh uninstall.sh "$APP/Contents/Resources/"
 if [ -n "${POODPIM_PRESET:-}" ]; then
   cp "$POODPIM_PRESET" "$APP/Contents/Resources/preset.json"
 fi
@@ -36,7 +38,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>
-  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>LSMinimumSystemVersion</key><string>13.4</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSMicrophoneUsageDescription</key>

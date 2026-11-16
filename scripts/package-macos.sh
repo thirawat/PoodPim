@@ -29,4 +29,6 @@ APP="$STAGE/PoodPim.app" POODPIM_PRESET="$TMP/preset.json" ./scripts/bundle-maco
 cp scripts/share/install-th.txt "$STAGE/README-TH.txt"
 ditto -c -k --keepParent "$STAGE" "$ZIP"
 rm -rf dist/share
-echo "Built $ZIP ($(du -h "$ZIP" | cut -f1))"
+# install.sh checks the download against this (upload it next to the zip).
+(cd dist && shasum -a 256 "$(basename "$ZIP")" > "$(basename "$ZIP").sha256")
+echo "Built $ZIP ($(du -h "$ZIP" | cut -f1)) and $ZIP.sha256"

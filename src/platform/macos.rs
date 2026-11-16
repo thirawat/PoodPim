@@ -115,6 +115,12 @@ pub fn accessibility_trusted(prompt: bool) -> bool {
 
 pub const TALK_KEY_LABEL: &str = "Right ⌥";
 
+/// Shown when PoodPim is opened while it is already running.
+pub const ALREADY_RUNNING: &str = "PoodPim เปิดอยู่แล้ว\n\n\
+ไอคอนไมโครโฟน 🎙 อยู่ที่แถบเมนูด้านบนขวาของจอ ถ้าไม่เห็น อาจถูกรอยบากของจอบังไว้ \
+ลองกด ⌘ ค้างแล้วลากไอคอนอื่นออกจากแถบเมนู หรือดูที่ System Settings › Menu Bar\n\n\
+กด Option ขวาค้างไว้เพื่อพูดได้เลย";
+
 /// Starts the app at login with a LaunchAgent pointing at this executable (rewritten on every
 /// start, so it follows the app if it is moved). Only for the bundled app, not dev builds.
 pub fn set_autostart(enable: bool) -> anyhow::Result<()> {
@@ -173,6 +179,14 @@ pub fn ask_server_settings(current_url: &str, current_key: &str) -> Option<(Stri
 pub fn ask_api_key(message: &str) -> Option<String> {
     let key = osascript_prompt(message, "", true)?.trim().to_string();
     (!key.is_empty()).then_some(key)
+}
+
+/// A message with an OK button. Returns when it is closed.
+pub fn alert(message: &str) {
+    let dialog = "display dialog (item 1 of argv) with title \"PoodPim\" buttons {\"OK\"} default button 1";
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", "on run argv", "-e", "activate", "-e", dialog, "-e", "end run", message])
+        .output();
 }
 
 /// A two-button dialog. True if the user picked `ok`.

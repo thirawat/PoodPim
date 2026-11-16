@@ -27,7 +27,7 @@ use crate::pipeline::{Outcome, Pipeline};
 use crate::overlay::{Overlay, Phase};
 use crate::platform::{self, HotkeyEvent, TALK_KEY_LABEL};
 use crate::segment::Segmenter;
-use crate::{inserter, model};
+use crate::{inserter, model, update};
 
 const TAP: Duration = Duration::from_millis(300);
 /// Safety cap on one recording; it is finished automatically after this.
@@ -38,6 +38,9 @@ const POLL: Duration = Duration::from_millis(250);
 const FRAME: Duration = Duration::from_millis(33);
 /// Skip the wake-up call if the server answered this recently (Lambda keeps instances ~5–15 min).
 const ASSUME_WARM: Duration = Duration::from_secs(180);
+/// First update check after launch, then one a day.
+const UPDATE_FIRST_CHECK: Duration = Duration::from_secs(20);
+const UPDATE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 enum UserEvent {
     Hotkey(HotkeyEvent),
@@ -50,6 +53,13 @@ enum UserEvent {
     DownloadAnswer(bool),
     Download(u64, u64),
     DownloadDone(Result<(), String>),
+    /// The daily check found this newer release tag.
+    UpdateFound(String),
+    /// Result of "Check for updates…".
+    UpdateChecked(Result<Option<String>, String>),
+    UpdateAnswer(String, bool),
+    /// None: cancelled; Some(delete the model too).
+    UninstallAnswer(Option<bool>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -76,6 +86,8 @@ struct Ui {
     paste_last: MenuItem,
     download: MenuItem,
     permission: MenuItem,
+    check_update: MenuItem,
+    uninstall: MenuItem,
     quit: MenuItem,
 }
 
@@ -103,9 +115,39 @@ struct App {
     overlay: Overlay,
     last_poll: Instant,
     proxy: EventLoopProxy<UserEvent>,
+    /// The "ready" message has been shown since launch.
+    announced: bool,
+    /// A newer release to offer once the app is idle and no dialog is open.
+    pending_update: Option<String>,
+    /// Already offered by the daily check this session (not asked again until the next launch).
+    offered_update: Option<String>,
+    /// Quit at the end of this event (an update or uninstall script has taken over).
+    quit: bool,
+    /// Held while running so a second copy of the app can tell.
+    _instance_lock: std::fs::File,
+}
+
+/// Locks a file in the settings folder; None if another copy of the app holds it.
+fn single_instance() -> Option<std::fs::File> {
+    let dir = model::app_dir(dirs::config_dir());
+    let _ = std::fs::create_dir_all(&dir);
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("app.lock")).ok()?;
+    match file.try_lock() {
+        Ok(()) => Some(file),
+        Err(std::fs::TryLockError::WouldBlock) => None,
+        Err(std::fs::TryLockError::Error(e)) => {
+            eprintln!("instance lock: {e}"); // can't tell; start anyway
+            Some(file)
+        }
+    }
 }
 
 pub fn run() -> Result<()> {
+    let Some(instance_lock) = single_instance() else {
+        // Opened again while running (often because the menu-bar icon is hidden): say so.
+        platform::alert(platform::ALREADY_RUNNING);
+        return Ok(());
+    };
     #[allow(unused_mut)]
     let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     #[cfg(target_os = "macos")]
@@ -141,6 +183,11 @@ pub fn run() -> Result<()> {
         overlay: Overlay::new(),
         last_poll: Instant::now(),
         proxy: proxy.clone(),
+        announced: false,
+        pending_update: None,
+        offered_update: None,
+        quit: false,
+        _instance_lock: instance_lock,
     };
     let mut ui: Option<Ui> = None;
 
@@ -171,6 +218,24 @@ pub fn run() -> Result<()> {
                 // First launch in Local mode: ask about the model now, not on the first key press.
                 if app.state == State::NeedsModel {
                     app.offer_download();
+                } else if app.state == State::Idle {
+                    app.announce_ready();
+                }
+                if update::supported() {
+                    let p = proxy.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(UPDATE_FIRST_CHECK);
+                        loop {
+                            match update::check() {
+                                Ok(Some(tag)) => {
+                                    let _ = p.send_event(UserEvent::UpdateFound(tag));
+                                }
+                                Ok(None) => {}
+                                Err(e) => eprintln!("update check: {e:#}"),
+                            }
+                            std::thread::sleep(UPDATE_EVERY);
+                        }
+                    });
                 }
             }
             Event::UserEvent(ev) => {
@@ -201,6 +266,10 @@ pub fn run() -> Result<()> {
                         app.start_download();
                     } else if id == ui.permission.id() {
                         platform::open_permission_settings();
+                    } else if id == ui.check_update.id() {
+                        app.check_update();
+                    } else if id == ui.uninstall.id() {
+                        app.ask_uninstall();
                     }
                 } else {
                     app.handle(ev);
@@ -210,6 +279,10 @@ pub fn run() -> Result<()> {
                 }
             }
             _ => {}
+        }
+        if app.quit {
+            *control_flow = ControlFlow::Exit;
+            return;
         }
         // While recording, wake up regularly to cut finished segments off the recording.
         *control_flow = if animating {
@@ -234,14 +307,21 @@ fn build_ui(cfg: &Config) -> Ui {
     let download = MenuItem::new("Download model (2.6 GB)", false, None);
     let hint = MenuItem::new(format!("Hold {TALK_KEY_LABEL} to talk · tap = hands-free · Esc = cancel"), false, None);
     let permission = MenuItem::new("Open Accessibility settings…", false, None);
+    let version = MenuItem::new(format!("PoodPim {}", update::CURRENT), false, None);
+    let check_update = MenuItem::new("Check for updates…", true, None);
+    let uninstall = MenuItem::new("Uninstall PoodPim…", true, None);
     let quit = MenuItem::new("Quit PoodPim", true, None);
     let menu = Menu::new();
-    let seps: Vec<PredefinedMenuItem> = (0..4).map(|_| PredefinedMenuItem::separator()).collect();
+    let seps: Vec<PredefinedMenuItem> = (0..5).map(|_| PredefinedMenuItem::separator()).collect();
     menu.append_items(&[
         &status, &permission, &seps[0], &local, &lambda, &server_settings, &seps[1], &mixed, &restore, &autostart, &paste_last, &download,
-        &seps[2], &hint, &seps[3], &quit,
+        &seps[2], &hint, &seps[3],
     ])
     .expect("menu");
+    if update::supported() {
+        menu.append_items(&[&version, &check_update, &uninstall, &seps[4]]).expect("menu");
+    }
+    menu.append(&quit).expect("menu");
     let (icon, template) = icon_for(State::Loading);
     let builder = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("PoodPim — Thai dictation");
     #[cfg(target_os = "macos")]
@@ -252,7 +332,7 @@ fn build_ui(cfg: &Config) -> Ui {
         builder.with_icon(icon)
     };
     let tray = builder.build().expect("tray icon");
-    Ui { tray, status, local, lambda, server_settings, mixed, restore, autostart, paste_last, download, permission, quit }
+    Ui { tray, status, local, lambda, server_settings, mixed, restore, autostart, paste_last, download, permission, check_update, uninstall, quit }
 }
 
 impl App {
@@ -433,6 +513,7 @@ impl App {
                         self.asr = Some(asr);
                         self.state = State::Idle;
                         self.status_text = self.ready_text();
+                        self.announce_ready();
                     }
                     Err(e) => self.fail(&e),
                 }
@@ -535,8 +616,106 @@ impl App {
                     self.overlay.set(Phase::NoSpeech);
                 }
             }
+            UserEvent::UpdateFound(tag) => {
+                if self.offered_update.as_ref() != Some(&tag) {
+                    self.offered_update = Some(tag.clone());
+                    self.pending_update = Some(tag);
+                }
+            }
+            UserEvent::UpdateChecked(r) => match r {
+                Ok(Some(tag)) => self.pending_update = Some(tag),
+                Ok(None) => show_alert(format!("PoodPim {} เป็นเวอร์ชันล่าสุดแล้ว", update::CURRENT)),
+                Err(e) => show_alert(format!("เช็คอัปเดตไม่ได้: {e}")),
+            },
+            UserEvent::UpdateAnswer(tag, yes) => {
+                self.dialog_open = false;
+                if !yes {
+                    return;
+                }
+                if self.busy() {
+                    self.pending_update = Some(tag); // ask again when the recording is done
+                    return;
+                }
+                match update::start_install(&tag) {
+                    Ok(()) => {
+                        eprintln!("updating to {tag}");
+                        self.quit = true;
+                    }
+                    Err(e) => show_alert(format!("อัปเดตไม่ได้: {e:#}")),
+                }
+            }
+            UserEvent::UninstallAnswer(answer) => {
+                self.dialog_open = false;
+                let Some(delete_model) = answer else { return };
+                match update::start_uninstall(delete_model) {
+                    Ok(()) => self.quit = true,
+                    Err(e) => show_alert(format!("ถอนการติดตั้งไม่ได้: {e:#}")),
+                }
+            }
             UserEvent::Menu(_) => {}
         }
+    }
+
+    /// Shows "ready" once per launch: proof the app runs even when its menu-bar icon is hidden.
+    fn announce_ready(&mut self) {
+        if !self.announced {
+            self.announced = true;
+            self.overlay.set(Phase::Ready);
+        }
+    }
+
+    fn check_update(&mut self) {
+        let p = self.proxy.clone();
+        std::thread::spawn(move || {
+            let _ = p.send_event(UserEvent::UpdateChecked(update::check().map_err(|e| format!("{e:#}"))));
+        });
+    }
+
+    /// Asks about a newer release, unless the user is busy or another dialog is open (then later).
+    fn offer_pending_update(&mut self) {
+        if self.busy() || self.dialog_open {
+            return;
+        }
+        let Some(tag) = self.pending_update.take() else { return };
+        self.dialog_open = true;
+        let p = self.proxy.clone();
+        std::thread::spawn(move || {
+            let yes = platform::confirm(
+                &format!(
+                    "มี PoodPim {} แล้ว (เครื่องนี้ใช้ {})\n\nอัปเดตเลยไหม? PoodPim จะปิดแล้วเปิดใหม่เองภายในไม่กี่วินาที",
+                    tag.trim_start_matches('v'),
+                    update::CURRENT
+                ),
+                "อัปเดต",
+                "ไว้ทีหลัง",
+            );
+            let _ = p.send_event(UserEvent::UpdateAnswer(tag, yes));
+        });
+    }
+
+    fn ask_uninstall(&mut self) {
+        if self.busy() || self.dialog_open {
+            return;
+        }
+        self.dialog_open = true;
+        let has_model = model::is_ready(&model::model_dir());
+        let p = self.proxy.clone();
+        std::thread::spawn(move || {
+            let answer = platform::confirm(
+                "ลบ PoodPim ออกจากเครื่องนี้?\n\nจะลบแอป การตั้งค่า และการเปิดเองตอนเปิดเครื่อง",
+                "ลบ PoodPim",
+                "ยกเลิก",
+            )
+            .then(|| {
+                has_model
+                    && platform::confirm(
+                        "ลบโมเดลถอดเสียง (2.4 GB) ด้วยไหม?\n\nถ้าเก็บไว้ ติดตั้งใหม่ภายหลังจะไม่ต้องดาวน์โหลดซ้ำ",
+                        "ลบโมเดลด้วย",
+                        "เก็บโมเดลไว้",
+                    )
+            });
+            let _ = p.send_event(UserEvent::UninstallAnswer(answer));
+        });
     }
 
     fn fail(&mut self, e: &str) {
@@ -724,6 +903,7 @@ impl App {
     }
 
     fn refresh(&mut self, ui: &Ui) {
+        self.offer_pending_update();
         if self.warm.as_ref().is_some_and(|w| w.is_finished()) && self.state != State::Recording {
             self.warm = None;
         }
@@ -747,6 +927,11 @@ impl App {
         #[cfg(not(target_os = "macos"))]
         let _ = (template, ui.tray.set_icon(Some(icon)));
     }
+}
+
+/// A message box that doesn't block the event loop.
+fn show_alert(message: String) {
+    std::thread::spawn(move || platform::alert(&message));
 }
 
 /// Draws a microphone glyph. Idle/loading icons are macOS "template" images (adapt to light/dark menu bars).

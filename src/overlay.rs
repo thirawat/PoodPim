@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Debug, PartialEq)]
 pub enum Phase {
     Hidden,
+    /// Shown once at launch, so people know the app is running even if its menu-bar icon is hidden.
+    Ready,
     Listening { handsfree: bool },
     Working,
     Done,
@@ -22,6 +24,7 @@ impl Phase {
     fn label(&self) -> String {
         match self {
             Phase::Hidden => String::new(),
+            Phase::Ready => format!("PoodPim พร้อมแล้ว · กด {} ค้างไว้เพื่อพูด", crate::platform::TALK_KEY_LABEL),
             Phase::Listening { handsfree: false } => "กำลังฟัง…".into(),
             Phase::Listening { handsfree: true } => {
                 format!("กำลังฟัง… แตะ {} อีกครั้งเพื่อจบ", crate::platform::TALK_KEY_LABEL)
@@ -40,6 +43,7 @@ impl Phase {
             Phase::Done => Some(Duration::from_millis(900)),
             Phase::NoSpeech | Phase::Cancelled => Some(Duration::from_millis(1200)),
             Phase::Failed => Some(Duration::from_millis(2500)),
+            Phase::Ready => Some(Duration::from_millis(3000)),
             _ => None,
         }
     }
@@ -48,7 +52,7 @@ impl Phase {
         match self {
             Phase::Listening { .. } => [1.0, 0.27, 0.23],
             Phase::Working => [1.0, 0.70, 0.25],
-            Phase::Done => [0.20, 0.84, 0.29],
+            Phase::Done | Phase::Ready => [0.20, 0.84, 0.29],
             Phase::Failed => [1.0, 0.27, 0.23],
             _ => [0.6, 0.6, 0.62],
         }

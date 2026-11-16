@@ -9,6 +9,37 @@ your cursor is — in any app. Speech recognition runs locally on the CPU with
 
 Written in Rust: one ~22 MB binary, ONNX Runtime linked in statically.
 
+## Install
+
+**macOS** (Apple silicon, macOS 13.4 or later), in Terminal:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/thirawat/PoodPim/main/install.sh | sh
+```
+
+**Windows** (10 / 11, 64-bit), in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/thirawat/PoodPim/main/install.ps1 | iex
+```
+
+The installer downloads the latest release, checks its SHA-256 (and on macOS that the app
+carries the PoodPim signature), installs it (`/Applications`, or
+`%LOCALAPPDATA%\Programs\PoodPim` with a Start menu shortcut) and opens it; the app then
+offers to download the speech model (2.6 GB). Run it again to update. A release candidate:
+put `POODPIM_VERSION=v1.0.2-rc.1` in front of `sh` (macOS) or set `$env:POODPIM_VERSION`
+first (Windows).
+
+Files fetched this way aren't quarantined, so macOS doesn't ask to "Open Anyway" and
+Windows SmartScreen doesn't stop the unsigned exe. The zips on the
+[releases page](https://github.com/thirawat/PoodPim/releases) work too, with those prompts.
+
+**Updates:** the app checks GitHub once a day and asks before updating (menu → Check for
+updates…). A release candidate also picks up newer release candidates.
+**Uninstall:** menu → Uninstall PoodPim… (asks whether to keep the downloaded model), or
+`curl -fsSL https://raw.githubusercontent.com/thirawat/PoodPim/main/uninstall.sh | sh`;
+on Windows also Settings › Apps › PoodPim.
+
 ## Use
 
 | | macOS | Windows |

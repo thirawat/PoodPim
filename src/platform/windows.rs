@@ -128,6 +128,19 @@ pub fn ask_api_key(message: &str) -> Option<String> {
     input_box(message, "")
 }
 
+/// Shown when PoodPim is opened while it is already running.
+pub const ALREADY_RUNNING: &str = "PoodPim เปิดอยู่แล้ว\n\nไอคอนไมโครโฟนอยู่ที่มุมขวาล่างของจอ (ข้างนาฬิกา) \
+ถ้าไม่เห็น ให้กดลูกศร ^ ข้างนาฬิกา\n\nกด Alt ขวาค้างไว้เพื่อพูดได้เลย";
+
+/// A message box with an OK button. Returns when it is closed.
+pub fn alert(message: &str) {
+    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MessageBoxW};
+    use windows::core::HSTRING;
+    unsafe {
+        MessageBoxW(None, &HSTRING::from(message), &HSTRING::from("PoodPim"), MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
+    }
+}
+
 /// An OK / Cancel message box. True for OK.
 pub fn confirm(message: &str, _ok: &str, _cancel: &str) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{IDOK, MB_ICONQUESTION, MB_OKCANCEL, MB_SETFOREGROUND, MessageBoxW};

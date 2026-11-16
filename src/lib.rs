@@ -22,3 +22,5 @@ pub mod overlay;
 pub mod platform;
 #[cfg(feature = "desktop")]
 pub mod remote;
+#[cfg(feature = "desktop")]
+pub mod update;
