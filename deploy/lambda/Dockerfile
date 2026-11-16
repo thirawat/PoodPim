@@ -12,6 +12,8 @@ ENV PATH=/root/.cargo/bin:$PATH
 WORKDIR /src
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
+# Default word lists the code embeds (include_str!).
+COPY assets/vocabulary.txt assets/corrections.txt ./assets/
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --no-default-features --features lambda --bin poodpim-lambda \
