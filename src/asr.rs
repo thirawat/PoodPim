@@ -42,8 +42,22 @@ fn merge_and_prune(mut hyps: Vec<Hyp>, beam: usize) -> Vec<Hyp> {
     out
 }
 
+/// ONNX Runtime allows one environment per process, so every load shares this one. (Building
+/// a second failed with "only one environment is allowed per process", which broke loading
+/// the model again: switching back to Local mode, or to the int8 model.)
+fn environment() -> Result<std::sync::Arc<ort::environment::Environment>> {
+    static ENV: std::sync::Mutex<Option<std::sync::Arc<ort::environment::Environment>>> = std::sync::Mutex::new(None);
+    let mut env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(e) = env.as_ref() {
+        return Ok(e.clone());
+    }
+    let e = std::sync::Arc::new(ort::init().with_name("poodpim").build()?);
+    *env = Some(e.clone());
+    Ok(e)
+}
+
 pub struct OpenThaiAsr {
-    _env: ort::environment::Environment,
+    _env: std::sync::Arc<ort::environment::Environment>,
     encoder: Session,
     decoder: Session,
     tokens: Vec<String>,
@@ -56,7 +70,7 @@ pub struct OpenThaiAsr {
 
 impl OpenThaiAsr {
     pub fn load(dir: &Path) -> Result<Self> {
-        let env = ort::init().with_name("poodpim").build()?;
+        let env = environment()?;
         let env_n = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
         let threads = env_n("POODPIM_ENC_THREADS", cores.min(4));

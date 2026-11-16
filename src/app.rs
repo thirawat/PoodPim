@@ -598,10 +598,14 @@ impl App {
                         self.state = State::Idle;
                         self.status_text = self.ready_text();
                         self.announce_ready();
-                        if std::mem::take(&mut self.remove_fp32_after_load) {
-                            // The int8 model loaded fine: the 2.4 GB full-precision one can go.
-                            model::remove_fp32(&model::model_dir());
-                            eprintln!("switched to the int8 model; removed the fp32 one");
+                        // The int8 model loaded fine: the 2.4 GB full-precision one, left from before
+                        // 1.0.2 or from a switch that didn't finish, can go (remove_fp32 only acts
+                        // when the int8 model is there).
+                        let dir = model::model_dir();
+                        self.remove_fp32_after_load = false;
+                        if dir.join("encoder.onnx.data").exists() && !model::is_fp32_only(&dir) {
+                            model::remove_fp32(&dir);
+                            eprintln!("using the int8 model; removed the fp32 one");
                         }
                     }
                     Err(e) => self.fail(&e),
