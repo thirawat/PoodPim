@@ -1,4 +1,10 @@
 //! Windows: low-level keyboard hook for Right Alt / Esc, SendInput for Ctrl+V.
+//!
+//! Right Alt is taken over: the hook handles it and does not pass it on. Windows opens the
+//! focused app's menu (Office shows its KeyTips) whenever Alt is pressed and released on
+//! its own, which is exactly how the talk key is used, so letting it through set off menus
+//! everywhere. On layouts where Right Alt is AltGr, Windows sends a fake Left Ctrl with it;
+//! that is swallowed too. Left Alt is untouched.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,7 +13,7 @@ use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_CONTROL,
-    VK_ESCAPE, VK_RMENU,
+    VK_ESCAPE, VK_LCONTROL, VK_RMENU,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, SetWindowsHookExW, WH_KEYBOARD_LL,
@@ -19,9 +25,8 @@ use super::{HotkeyEvent, HotkeySink};
 static SINK: OnceLock<HotkeySink> = OnceLock::new();
 static TALK_DOWN: AtomicBool = AtomicBool::new(false);
 const VK_V: VIRTUAL_KEY = VIRTUAL_KEY(0x56);
-/// An unassigned key code. Tapping it while Alt is held stops Windows from opening
-/// the focused app's menu bar when Alt is released on its own.
-const VK_MASK: VIRTUAL_KEY = VIRTUAL_KEY(0xFF);
+/// Scan code of the Left Ctrl that Windows makes up in front of AltGr.
+const ALTGR_FAKE_CTRL_SCAN: u32 = 0x21D;
 
 pub fn spawn_hotkey_listener(sink: HotkeySink) {
     if SINK.set(sink).is_err() {
@@ -55,12 +60,16 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         if let (false, Some(sink)) = (injected, SINK.get()) {
             if kb.vkCode == VK_RMENU.0 as u32 {
                 if is_down && !TALK_DOWN.swap(true, Ordering::SeqCst) {
-                    std::thread::spawn(|| send_keys(&[(VK_MASK, true), (VK_MASK, false)]));
                     sink(HotkeyEvent::TalkDown);
                 } else if is_up && TALK_DOWN.swap(false, Ordering::SeqCst) {
                     sink(HotkeyEvent::TalkUp);
                 }
-            } else if kb.vkCode == VK_ESCAPE.0 as u32 && is_down {
+                return LRESULT(1); // swallowed, auto-repeats included: no app sees Right Alt
+            }
+            if kb.vkCode == VK_LCONTROL.0 as u32 && kb.scanCode == ALTGR_FAKE_CTRL_SCAN {
+                return LRESULT(1);
+            }
+            if kb.vkCode == VK_ESCAPE.0 as u32 && is_down {
                 sink(HotkeyEvent::Escape);
             }
         }

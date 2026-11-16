@@ -123,7 +123,10 @@ Windows: `package-windows.sh` cross-compiles from macOS with
 MSVC/SDK libraries are cached in `target/xwin-cache`), or build on Windows with the MSVC
 toolchain (`cargo build --release`). The zip ships `DirectML.dll` next to the exe (the prebuilt
 ONNX Runtime for Windows always links it) and needs the Visual C++ runtime on the PC. The
-Windows build shows the same bottom-of-screen overlay as macOS (a GDI tool window) and asks
+On Windows, PoodPim takes Right Alt for itself: other apps never see it, because an Alt
+pressed and released on its own opens the focused app's menu (Office KeyTips). Left Alt is
+unaffected; on keyboard layouts that type with AltGr (Right Alt), AltGr is unavailable while
+PoodPim runs. The Windows build shows the same bottom-of-screen overlay as macOS (a GDI tool window) and asks
 for the server URL / API key with InputBox dialogs. Its log is
 `%LOCALAPPDATA%\poodpim\logs\poodpim.log` (macOS: `~/Library/Logs/PoodPim/poodpim.log`); it
 records timings and errors, not what was said.
