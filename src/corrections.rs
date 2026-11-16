@@ -123,9 +123,47 @@ pub fn replace(text: &str, from: &str, to: &str) -> String {
     out
 }
 
+/// Puts a space between Thai letters and Latin letters that touch ("ต้องhotfixด่วน" →
+/// "ต้อง hotfix ด่วน"): the model often writes them together, and mixed Thai/English text
+/// is easier to read spaced. Digits are left alone ("ข้อ3" and "ข้อ 3" are both usual).
+pub fn space_thai_latin(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut prev: Option<char> = None;
+    for c in text.chars() {
+        if let Some(p) = prev {
+            if (is_thai(p) && c.is_ascii_alphabetic()) || (p.is_ascii_alphabetic() && is_thai(c)) {
+                out.push(' ');
+            }
+        }
+        out.push(c);
+        prev = Some(c);
+    }
+    out
+}
+
+/// Appends `heard = wanted` to the user's corrections file (menu → Add correction…).
+pub fn add_to_user_file(heard: &str, wanted: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = user_file();
+    let _ = read_user_list(); // creates the file from the default the first time
+    let mut f = std::fs::OpenOptions::new().append(true).open(&path)?;
+    let ends_with_newline = std::fs::read_to_string(&path).map(|t| t.is_empty() || t.ends_with('\n')).unwrap_or(true);
+    if !ends_with_newline {
+        writeln!(f)?;
+    }
+    writeln!(f, "{} = {}", heard.trim(), wanted.trim())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spaces_thai_and_latin_apart() {
+        assert_eq!(space_thai_latin("ต้องhotfixด่วน ที่postคิว L"), "ต้อง hotfix ด่วน ที่ post คิว L");
+        assert_eq!(space_thai_latin("ข้อ3 กับ v2 ใน API ปี2026"), "ข้อ3 กับ v2 ใน API ปี2026", "digits untouched");
+        assert_eq!(space_thai_latin("ใช้ GPU กับ CPU"), "ใช้ GPU กับ CPU", "already spaced");
+    }
 
     #[test]
     fn replaces_longest_first_with_spaces() {

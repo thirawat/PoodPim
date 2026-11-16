@@ -363,3 +363,103 @@ outsource
 freelance
 remote
 onboarding
+
+# Business analysis (BA)
+business requirement
+functional requirement
+non-functional requirement
+acceptance criteria
+definition of done
+use case diagram
+BRD
+FRD
+SRS
+as-is
+to-be
+gap analysis
+process flow
+flowchart
+swimlane
+BPMN
+ERD
+data flow
+data mapping
+data dictionary
+sign-off
+SIT
+test scenario
+defect
+change request
+impact
+impact analysis
+out of scope
+timeline
+deliverable
+cutover
+rollout
+hypercare
+handover
+KPI
+OKR
+insight
+report
+reporting
+analytics
+business case
+ROI
+cost
+budget
+risk
+assumption
+constraint
+priority
+prioritize
+MoSCoW
+workshop
+interview
+survey
+persona
+user journey
+customer journey
+pain point
+feedback
+follow up
+action item
+agenda
+presentation
+proposal
+approve
+approval
+review
+feasibility
+sprint planning
+sprint review
+retrospective
+grooming
+refinement
+story point
+epic
+effort
+velocity
+capacity
+resource
+vendor
+contract
+compliance
+audit
+PDPA
+consent
+CRM
+ERP
+SAP
+Power BI
+Tableau
+Confluence
+Miro
+Visio
+Scrum Master
+product backlog
+business analyst
+system analyst
+template
+requirement gathering

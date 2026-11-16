@@ -137,6 +137,11 @@ pub fn open_in_editor(path: &std::path::Path) {
 pub fn open_permission_settings() {}
 
 /// Asks for the API key. None if cancelled or left empty.
+/// A one-line text prompt. None if cancelled or left empty.
+pub fn ask_text(message: &str, default: &str) -> Option<String> {
+    input_box(message, default, false)
+}
+
 pub fn ask_api_key(message: &str) -> Option<String> {
     input_box(message, "", true)
 }

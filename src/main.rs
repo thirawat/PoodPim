@@ -187,7 +187,7 @@ fn transcribe(args: &[String]) -> Result<()> {
             out.segments,
             if live { "after release " } else { "" },
             wait.as_secs_f32(),
-            fixes.apply(&out.text)
+            poodpim::corrections::space_thai_latin(&fixes.apply(&out.text))
         );
         for e in &out.errors {
             eprintln!("segment error: {e}");

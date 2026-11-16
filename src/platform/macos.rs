@@ -221,6 +221,12 @@ pub fn confirm(message: &str, ok: &str, cancel: &str) -> bool {
     out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == ok
 }
 
+/// A one-line text prompt. None if cancelled or left empty.
+pub fn ask_text(message: &str, default: &str) -> Option<String> {
+    let t = osascript_prompt(message, default, false)?.trim().to_string();
+    (!t.is_empty()).then_some(t)
+}
+
 fn osascript_prompt(message: &str, default: &str, hidden: bool) -> Option<String> {
     // Values go in as argv so nothing typed is ever interpreted as AppleScript.
     let dialog = if hidden {

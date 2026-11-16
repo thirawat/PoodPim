@@ -66,6 +66,8 @@ enum UserEvent {
     UpdateInstalled(Result<(), String>),
     /// None: cancelled; Some(delete the model too).
     UninstallAnswer(Option<bool>),
+    /// From "Add correction…": (heard, wanted), or None if cancelled.
+    CorrectionAnswer(Option<(String, String)>),
     /// Answer to "replace the old model with the smaller one?".
     ModelUpgradeAnswer(bool),
     ModelUpgradeProgress(u64, u64),
@@ -93,6 +95,7 @@ struct Ui {
     mixed: CheckMenuItem,
     vocabulary: MenuItem,
     corrections: MenuItem,
+    add_correction: MenuItem,
     restore: CheckMenuItem,
     autostart: CheckMenuItem,
     paste_last: MenuItem,
@@ -329,6 +332,8 @@ pub fn run() -> Result<()> {
                     } else if id == ui.vocabulary.id() {
                         app.reload_vocabulary(); // creates the file on first use
                         platform::open_in_editor(&hotwords::user_file());
+                    } else if id == ui.add_correction.id() {
+                        app.ask_correction();
                     } else if id == ui.corrections.id() {
                         app.reload_vocabulary();
                         platform::open_in_editor(&corrections::user_file());
@@ -385,6 +390,7 @@ fn build_ui(cfg: &Config) -> Ui {
     let mixed = CheckMenuItem::new("Thai + English (mixed)", true, cfg.mixed_english, None);
     let vocabulary = MenuItem::new("My vocabulary…", true, None);
     let corrections = MenuItem::new("Word corrections…", true, None);
+    let add_correction = MenuItem::new("Add correction…", true, None);
     let restore = CheckMenuItem::new("Restore clipboard after paste", true, cfg.restore_clipboard, None);
     let autostart = CheckMenuItem::new("Start at login", true, cfg.start_at_login, None);
     let paste_last = MenuItem::new("Paste last transcript", false, None);
@@ -398,7 +404,7 @@ fn build_ui(cfg: &Config) -> Ui {
     let menu = Menu::new();
     let seps: Vec<PredefinedMenuItem> = (0..5).map(|_| PredefinedMenuItem::separator()).collect();
     menu.append_items(&[
-        &status, &permission, &seps[0], &local, &lambda, &server_settings, &seps[1], &mixed, &vocabulary, &corrections, &restore, &autostart, &paste_last, &download,
+        &status, &permission, &seps[0], &local, &lambda, &server_settings, &seps[1], &mixed, &vocabulary, &corrections, &add_correction, &restore, &autostart, &paste_last, &download,
         &seps[2], &hint, &seps[3],
     ])
     .expect("menu");
@@ -416,7 +422,7 @@ fn build_ui(cfg: &Config) -> Ui {
         builder.with_icon(icon)
     };
     let tray = builder.build().expect("tray icon");
-    Ui { tray, status, local, lambda, server_settings, mixed, vocabulary, corrections, restore, autostart, paste_last, download, permission, check_update, uninstall, quit }
+    Ui { tray, status, local, lambda, server_settings, mixed, vocabulary, corrections, add_correction, restore, autostart, paste_last, download, permission, check_update, uninstall, quit }
 }
 
 impl App {
@@ -698,7 +704,7 @@ impl App {
                     );
                 }
                 if !out.text.is_empty() {
-                    let text = self.corrections.apply(&out.text);
+                    let text = corrections::space_thai_latin(&self.corrections.apply(&out.text));
                     eprintln!("{:.1}s in {} segment(s): {}", out.audio_s, out.segments, said(&text));
                     self.last_text = text.clone();
                     self.paste(text);
@@ -774,6 +780,17 @@ impl App {
                     }
                 }
             }
+            UserEvent::CorrectionAnswer(answer) => {
+                self.dialog_open = false;
+                let Some((heard, wanted)) = answer else { return };
+                match corrections::add_to_user_file(&heard, &wanted) {
+                    Ok(()) => {
+                        self.reload_vocabulary();
+                        eprintln!("added a correction");
+                    }
+                    Err(e) => show_alert(format!("บันทึกไม่ได้: {e}")),
+                }
+            }
             UserEvent::ModelUpgradeAnswer(yes) => {
                 self.dialog_open = false;
                 if !yes {
@@ -838,6 +855,26 @@ impl App {
                 "ไว้ทีหลัง",
             );
             let _ = p.send_event(UserEvent::ModelUpgradeAnswer(yes));
+        });
+    }
+
+    /// Two prompts: the word as it came out, then as it should be; appended to the corrections.
+    fn ask_correction(&mut self) {
+        if self.dialog_open {
+            return;
+        }
+        self.dialog_open = true;
+        let p = self.proxy.clone();
+        std::thread::spawn(move || {
+            let answer = platform::ask_text(
+                "แก้คำ (1/2): คำที่ PoodPim พิมพ์ออกมาผิด\nเช่น ฟีดแบ็ก หรือ depop\n(ได้ยินผิดหลายแบบ คั่นด้วยจุลภาค ,)",
+                "",
+            )
+            .and_then(|heard| {
+                let wanted = platform::ask_text(&format!("แก้คำ (2/2): ให้เขียน \"{heard}\" เป็นอะไร\nเช่น feedback หรือ DevOps"), "")?;
+                Some((heard, wanted))
+            });
+            let _ = p.send_event(UserEvent::CorrectionAnswer(answer));
         });
     }
 
