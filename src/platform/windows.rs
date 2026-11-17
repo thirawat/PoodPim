@@ -102,6 +102,55 @@ pub fn send_paste() {
     send_keys(&[(VK_CONTROL, true), (VK_V, true), (VK_V, false), (VK_CONTROL, false)]);
 }
 
+/// Whether the focused window belongs to an app run as administrator. Windows silently drops
+/// keystrokes sent to it from a normal app, so Ctrl+V from PoodPim would do nothing.
+pub fn foreground_is_elevated() -> bool {
+    use windows::Win32::Foundation::{CloseHandle, E_ACCESSDENIED};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    let Ok(ours) = (unsafe { integrity_level(GetCurrentProcess()) }) else { return false };
+    let theirs = unsafe {
+        let window = GetForegroundWindow();
+        let mut pid = 0u32;
+        if window.is_invalid() || GetWindowThreadProcessId(window, Some(&mut pid)) == 0 {
+            return false;
+        }
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).and_then(|p| {
+            let level = integrity_level(p);
+            let _ = CloseHandle(p);
+            level
+        })
+    };
+    match theirs {
+        Ok(level) => level > ours,
+        // Not even allowed to look: a higher-integrity process (or a protected one).
+        Err(e) => e.code() == E_ACCESSDENIED,
+    }
+}
+
+/// A process's integrity level: 0x2000 for a normal app, 0x3000 for one run as administrator.
+///
+/// # Safety
+/// `process` must be a valid handle with PROCESS_QUERY_LIMITED_INFORMATION access.
+unsafe fn integrity_level(process: windows::Win32::Foundation::HANDLE) -> windows::core::Result<u32> {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenIntegrityLevel};
+    use windows::Win32::System::Threading::OpenProcessToken;
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(process, TOKEN_QUERY, &mut token)?;
+        // A TOKEN_MANDATORY_LABEL followed by its SID (at most 68 bytes); u64s keep it aligned.
+        let mut buf = [0u64; 16];
+        let mut written = 0u32;
+        let r = GetTokenInformation(token, TokenIntegrityLevel, Some(buf.as_mut_ptr().cast()), size_of_val(&buf) as u32, &mut written);
+        let _ = CloseHandle(token);
+        r?;
+        let sid = (*buf.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid;
+        let count = u32::from(*GetSidSubAuthorityCount(sid));
+        Ok(*GetSidSubAuthority(sid, count.saturating_sub(1)))
+    }
+}
+
 pub fn accessibility_trusted(_prompt: bool) -> bool {
     true
 }

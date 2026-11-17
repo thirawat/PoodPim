@@ -70,6 +70,12 @@ pub struct OpenThaiAsr {
 
 impl OpenThaiAsr {
     pub fn load(dir: &Path) -> Result<Self> {
+        Self::load_with(dir, true)
+    }
+
+    /// `warm_up`: run the model twice on noise so the first real dictation is fast. Not worth
+    /// it when real speech follows straight away (loading again after being freed when idle).
+    pub fn load_with(dir: &Path, warm_up: bool) -> Result<Self> {
         let env = environment()?;
         let env_n = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
@@ -109,7 +115,7 @@ impl OpenThaiAsr {
         // ONNX Runtime is slow on its first runs (allocations, kernel set-up); warm it up
         // so the first real dictation is fast.
         let noise: Vec<f32> = (0..SAMPLE_RATE as usize * 3).map(|i| ((i * 7919 % 1000) as f32 / 1000.0 - 0.5) * 0.01).collect();
-        for _ in 0..2 {
+        for _ in 0..if warm_up { 2 } else { 0 } {
             asr.transcribe(&noise, true, &Hotwords::default())?;
         }
         Ok(asr)

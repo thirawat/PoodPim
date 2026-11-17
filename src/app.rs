@@ -36,6 +36,11 @@ const TAP: Duration = Duration::from_millis(300);
 const MAX_RECORDING: Duration = Duration::from_secs(10 * 60);
 /// How often the recording is checked for a finished segment.
 const POLL: Duration = Duration::from_millis(250);
+/// Recording goes on this long after the talk key is let go: people let go while saying the
+/// last syllable (fast speakers especially), and the sound card still holds a bit of audio.
+const TAIL: Duration = Duration::from_millis(200);
+/// With "Free memory when idle": the model is freed after this long without dictation.
+const UNLOAD_AFTER: Duration = Duration::from_secs(15 * 60);
 /// Overlay animation frame interval.
 const FRAME: Duration = Duration::from_millis(33);
 /// Skip the wake-up call if the server answered this recently (Lambda keeps instances ~5–15 min).
@@ -50,6 +55,8 @@ enum UserEvent {
     Hotkey(HotkeyEvent, Instant),
     Menu(MenuEvent),
     ModelLoaded(u64, Result<Arc<Mutex<OpenThaiAsr>>, String>),
+    /// The model freed when idle was loaded again for a recording (see `asleep`).
+    ModelWoke(u64, Result<Arc<Mutex<OpenThaiAsr>>, String>),
     Transcribed(u64, Outcome),
     Warmed(Result<u64, String>),
     ServerSettings(Option<(String, String)>),
@@ -97,6 +104,7 @@ struct Ui {
     corrections: MenuItem,
     add_correction: MenuItem,
     restore: CheckMenuItem,
+    unload: CheckMenuItem,
     autostart: CheckMenuItem,
     paste_last: MenuItem,
     download: MenuItem,
@@ -110,9 +118,18 @@ struct App {
     cfg: Config,
     state: State,
     asr: Option<Arc<Mutex<OpenThaiAsr>>>,
+    /// The model was freed after UNLOAD_AFTER without dictation: the state stays Idle and the
+    /// next recording loads it again while the user speaks.
+    asleep: bool,
+    /// Loading the model again after it was freed (see `asleep`).
+    waking: Option<Arc<Waking>>,
+    /// The last dictation (or model load): what UNLOAD_AFTER counts from.
+    last_used: Instant,
     load_gen: u64,
     recorder: Recorder,
     pressed_at: Instant,
+    /// The talk key was let go: finish the recording at this time (see TAIL).
+    stop_at: Option<Instant>,
     handsfree: bool,
     last_text: String,
     status_text: String,
@@ -230,9 +247,13 @@ pub fn run() -> Result<()> {
         cfg: Config::load(),
         state: State::Loading,
         asr: None,
+        asleep: false,
+        waking: None,
+        last_used: Instant::now(),
         load_gen: 0,
         recorder: Recorder::new(),
         pressed_at: Instant::now(),
+        stop_at: None,
         handsfree: false,
         last_text: String::new(),
         status_text: String::new(),
@@ -267,6 +288,10 @@ pub fn run() -> Result<()> {
     let mut ui: Option<Ui> = None;
 
     event_loop.run(move |event, _, control_flow| {
+        if app.state == State::Recording && app.stop_at.is_some_and(|t| Instant::now() >= t) {
+            app.stop_at = None;
+            app.finish();
+        }
         if app.state == State::Recording {
             app.update_level();
             if app.last_poll.elapsed() >= POLL {
@@ -277,6 +302,7 @@ pub fn run() -> Result<()> {
                 }
             }
         }
+        app.unload_if_idle();
         let animating = app.overlay.tick();
         match event {
             Event::NewEvents(StartCause::Init) => {
@@ -344,11 +370,17 @@ pub fn run() -> Result<()> {
                         app.cfg.start_at_login = ui.autostart.is_checked();
                         app.cfg.save();
                         app.apply_autostart();
+                    } else if id == ui.unload.id() {
+                        app.cfg.unload_when_idle = ui.unload.is_checked();
+                        app.cfg.save();
+                        app.last_used = Instant::now();
                     } else if id == ui.restore.id() {
                         app.cfg.restore_clipboard = ui.restore.is_checked();
                         app.cfg.save();
                     } else if id == ui.paste_last.id() {
-                        app.paste(app.last_text.clone());
+                        if app.paste(app.last_text.clone()) == Phase::Copied {
+                            app.overlay.set(Phase::Copied);
+                        }
                     } else if id == ui.download.id() {
                         app.start_download();
                     } else if id == ui.permission.id() {
@@ -375,7 +407,9 @@ pub fn run() -> Result<()> {
         *control_flow = if animating {
             ControlFlow::WaitUntil(Instant::now() + FRAME)
         } else if app.state == State::Recording {
-            ControlFlow::WaitUntil(Instant::now() + POLL)
+            ControlFlow::WaitUntil(app.stop_at.unwrap_or(Instant::now() + POLL).min(Instant::now() + POLL))
+        } else if let Some(t) = app.unload_at() {
+            ControlFlow::WaitUntil(t)
         } else {
             ControlFlow::Wait
         };
@@ -392,6 +426,7 @@ fn build_ui(cfg: &Config) -> Ui {
     let corrections = MenuItem::new("Word corrections…", true, None);
     let add_correction = MenuItem::new("Add correction…", true, None);
     let restore = CheckMenuItem::new("Restore clipboard after paste", true, cfg.restore_clipboard, None);
+    let unload = CheckMenuItem::new("Free memory when idle (15 min)", true, cfg.unload_when_idle, None);
     let autostart = CheckMenuItem::new("Start at login", true, cfg.start_at_login, None);
     let paste_last = MenuItem::new("Paste last transcript", false, None);
     let download = MenuItem::new("Download model (1 GB)", false, None);
@@ -404,7 +439,7 @@ fn build_ui(cfg: &Config) -> Ui {
     let menu = Menu::new();
     let seps: Vec<PredefinedMenuItem> = (0..5).map(|_| PredefinedMenuItem::separator()).collect();
     menu.append_items(&[
-        &status, &permission, &seps[0], &local, &lambda, &server_settings, &seps[1], &mixed, &vocabulary, &corrections, &add_correction, &restore, &autostart, &paste_last, &download,
+        &status, &permission, &seps[0], &local, &lambda, &server_settings, &seps[1], &mixed, &vocabulary, &corrections, &add_correction, &restore, &unload, &autostart, &paste_last, &download,
         &seps[2], &hint, &seps[3],
     ])
     .expect("menu");
@@ -422,7 +457,7 @@ fn build_ui(cfg: &Config) -> Ui {
         builder.with_icon(icon)
     };
     let tray = builder.build().expect("tray icon");
-    Ui { tray, status, local, lambda, server_settings, mixed, vocabulary, corrections, add_correction, restore, autostart, paste_last, download, permission, check_update, uninstall, quit }
+    Ui { tray, status, local, lambda, server_settings, mixed, vocabulary, corrections, add_correction, restore, unload, autostart, paste_last, download, permission, check_update, uninstall, quit }
 }
 
 impl App {
@@ -449,6 +484,8 @@ impl App {
             Backend::Local => self.start_loading(),
             Backend::Lambda => {
                 self.asr = None; // free the ~3 GB local model
+                self.asleep = false;
+                self.waking = None;
                 if self.cfg.server().url.is_empty() {
                     self.state = State::NeedsServer;
                     self.status_text = format!("Enter the API URL && key: press {TALK_KEY_LABEL}");
@@ -558,6 +595,8 @@ impl App {
             self.status_text = "Model not downloaded".into();
             return;
         }
+        self.asleep = false;
+        self.waking = None;
         if self.asr.is_some() {
             self.state = State::Idle;
             self.status_text = self.ready_text();
@@ -601,6 +640,7 @@ impl App {
                 match r {
                     Ok(asr) => {
                         self.asr = Some(asr);
+                        self.last_used = Instant::now();
                         self.state = State::Idle;
                         self.status_text = self.ready_text();
                         self.announce_ready();
@@ -615,6 +655,21 @@ impl App {
                         }
                     }
                     Err(e) => self.fail(&e),
+                }
+            }
+            UserEvent::ModelWoke(generation, r) => {
+                if generation != self.load_gen || self.cfg.backend != Backend::Local || !self.asleep {
+                    return;
+                }
+                self.waking = None;
+                match r {
+                    Ok(asr) => {
+                        self.asr = Some(asr);
+                        self.asleep = false;
+                        self.last_used = Instant::now();
+                    }
+                    // Stays asleep: the next recording tries again (this one reports the error).
+                    Err(e) => eprintln!("loading the model again: {e}"),
                 }
             }
             // The server may have been set up during the download (that switches to Lambda):
@@ -688,6 +743,7 @@ impl App {
                 if generation != self.rec_gen {
                     return; // cancelled recording
                 }
+                self.last_used = Instant::now();
                 self.state = State::Idle;
                 self.status_text = self.ready_text();
                 if self.cfg.backend == Backend::Lambda && out.errors.len() < out.segments {
@@ -707,8 +763,8 @@ impl App {
                     let text = corrections::space_thai_latin(&self.corrections.apply(&out.text));
                     eprintln!("{:.1}s in {} segment(s): {}", out.audio_s, out.segments, said(&text));
                     self.last_text = text.clone();
-                    self.paste(text);
-                    self.overlay.set(Phase::Done);
+                    let phase = self.paste(text);
+                    self.overlay.set(phase);
                 } else if !out.errors.is_empty() {
                     self.overlay.set(Phase::Failed);
                 } else {
@@ -1002,7 +1058,10 @@ impl App {
                         return;
                     }
                 }
-                if self.state == State::Recording && self.handsfree {
+                if self.state == State::Recording && self.stop_at.is_some() {
+                    // Pressed again within TAIL of letting go: carry on with the same recording.
+                    self.stop_at = None;
+                } else if self.state == State::Recording && self.handsfree {
                     self.handsfree = false;
                     self.finish();
                 } else if self.state == State::Idle {
@@ -1037,12 +1096,13 @@ impl App {
                         self.status_text = format!("Listening… (tap {TALK_KEY_LABEL} to finish)");
                         self.overlay.set(Phase::Listening { handsfree: true });
                     } else {
-                        self.finish();
+                        self.stop_at = Some(at + TAIL);
                     }
                 }
             }
             HotkeyEvent::Escape => {
                 if self.state == State::Recording {
+                    self.stop_at = None;
                     self.recorder.stop_raw();
                     self.segmenter = None;
                     if let Some(p) = self.pipeline.take() {
@@ -1072,7 +1132,29 @@ impl App {
         self.reload_vocabulary();
         self.segmenter = Some(Segmenter::new(self.recorder.rate()));
         let mixed = self.cfg.mixed_english;
+        self.last_used = Instant::now();
         self.pipeline = Some(match self.cfg.backend {
+            Backend::Local if self.asr.is_none() => {
+                // Freed when idle: load it while the user speaks; segments wait for it. A load
+                // already under way (recording cancelled and started again) is shared.
+                let waking = match &self.waking {
+                    Some(w) => w.clone(),
+                    None => {
+                        let w = Arc::new(Waking::default());
+                        self.waking = Some(w.clone());
+                        w.start(self.proxy.clone(), self.load_gen);
+                        w
+                    }
+                };
+                let vocabulary = self.vocabulary.clone();
+                Pipeline::start(
+                    move |a: &[f32]| match waking.wait() {
+                        Ok(asr) => asr.lock().unwrap().transcribe(a, mixed, &vocabulary),
+                        Err(e) => Err(anyhow::anyhow!("loading the model: {e}")),
+                    },
+                    None,
+                )
+            }
             Backend::Local => {
                 let asr = self.asr.clone().expect("model loaded in Idle state");
                 let vocabulary = self.vocabulary.clone();
@@ -1090,6 +1172,22 @@ impl App {
                 Pipeline::start(move |a: &[f32]| server.transcribe(a, mixed, &vocabulary), self.warm.take())
             }
         });
+    }
+
+    /// When the idle model is due to be freed (None: not applicable).
+    fn unload_at(&self) -> Option<Instant> {
+        let applies = self.cfg.unload_when_idle && self.cfg.backend == Backend::Local && self.state == State::Idle;
+        // POODPIM_UNLOAD_AFTER_S: a shorter wait, for testing.
+        let after = std::env::var("POODPIM_UNLOAD_AFTER_S").ok().and_then(|v| v.parse().ok()).map_or(UNLOAD_AFTER, Duration::from_secs);
+        (applies && self.asr.is_some() && self.pipeline.is_none()).then(|| self.last_used + after)
+    }
+
+    fn unload_if_idle(&mut self) {
+        if self.unload_at().is_some_and(|t| Instant::now() >= t) {
+            self.asr = None;
+            self.asleep = true;
+            eprintln!("freed the model: no dictation for a while");
+        }
     }
 
     /// Feeds the microphone level of the last 50 ms to the overlay.
@@ -1129,6 +1227,7 @@ impl App {
     }
 
     fn finish(&mut self) {
+        self.stop_at = None;
         let raw = self.recorder.stop_raw();
         let rate = self.recorder.rate();
         eprintln!("recorded {:.2}s at {rate} Hz", raw.len() as f64 / rate.max(1) as f64);
@@ -1159,9 +1258,20 @@ impl App {
         });
     }
 
-    fn paste(&self, text: String) {
+    /// Pastes in the background; returns what the overlay should say.
+    fn paste(&self, text: String) -> Phase {
         if text.is_empty() {
-            return;
+            return Phase::Done;
+        }
+        if crate::platform::foreground_is_elevated() {
+            eprintln!("focused app runs as administrator: copied instead of pasting");
+            return match inserter::copy_text(&text) {
+                Ok(()) => Phase::Copied,
+                Err(e) => {
+                    eprintln!("copy error: {e:#}");
+                    Phase::Failed
+                }
+            };
         }
         let restore = self.cfg.restore_clipboard;
         std::thread::spawn(move || {
@@ -1169,6 +1279,7 @@ impl App {
                 eprintln!("paste error: {e:#}");
             }
         });
+        Phase::Done
     }
 
     fn refresh(&mut self, ui: &Ui) {
@@ -1201,6 +1312,40 @@ impl App {
 /// A message box that doesn't block the event loop.
 fn show_alert(message: String) {
     std::thread::spawn(move || platform::alert(&message));
+}
+
+/// The model loading again after it was freed when idle; recordings wait for it.
+#[derive(Default)]
+struct Waking {
+    result: Mutex<Option<Result<Arc<Mutex<OpenThaiAsr>>, String>>>,
+    done: std::sync::Condvar,
+}
+
+impl Waking {
+    fn start(self: &Arc<Self>, proxy: EventLoopProxy<UserEvent>, generation: u64) {
+        eprintln!("loading the model again (freed when idle)");
+        let w = self.clone();
+        std::thread::spawn(move || {
+            let t = Instant::now();
+            let r = std::panic::catch_unwind(|| OpenThaiAsr::load_with(&model::model_dir(), false))
+                .map_err(|_| "the model loader crashed".to_string())
+                .and_then(|r| r.map(|a| Arc::new(Mutex::new(a))).map_err(|e| format!("{e:#}")));
+            eprintln!("model loaded again in {:.1} s", t.elapsed().as_secs_f32());
+            *w.result.lock().unwrap() = Some(r.clone());
+            w.done.notify_all();
+            let _ = proxy.send_event(UserEvent::ModelWoke(generation, r));
+        });
+    }
+
+    fn wait(&self) -> Result<Arc<Mutex<OpenThaiAsr>>, String> {
+        let mut g = self.result.lock().unwrap();
+        loop {
+            if let Some(r) = &*g {
+                return r.clone();
+            }
+            g = self.done.wait(g).unwrap();
+        }
+    }
 }
 
 /// Draws a microphone glyph. Idle/loading icons are macOS "template" images (adapt to light/dark menu bars).

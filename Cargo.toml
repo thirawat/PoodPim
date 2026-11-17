@@ -1,6 +1,6 @@
 [package]
 name = "poodpim"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2024"
 license = "MIT"
 default-run = "poodpim"
@@ -9,7 +9,7 @@ default-run = "poodpim"
 default = ["desktop"]
 # Menu-bar / tray dictation app (macOS, Windows).
 # ONNX Runtime linked statically (prebuilt by the ort crate).
-desktop = ["ort/download-binaries", "dep:arboard", "dep:cpal", "dep:tao", "dep:tray-icon", "dep:ureq", "dep:zip"]
+desktop = ["ort/download-binaries", "dep:arboard", "dep:cpal", "dep:tao", "dep:tray-icon", "dep:ureq", "dep:zip", "dep:sha2"]
 # AWS Lambda transcription server (Linux, Function URL).
 # ONNX Runtime loaded at run time from $ORT_DYLIB_PATH (Microsoft's official build, set in the image),
 # because the prebuilt static library needs a newer libstdc++ than Amazon Linux 2023 has.
@@ -31,6 +31,7 @@ dirs = "7.0.0"
 hound = "3.5.1"
 ort = { version = "2.0.0-rc.15", default-features = false, features = ["std", "tls-native", "api-31"] }
 realfft = "3.5.1"
+sha2 = { version = "0.11.0", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 
@@ -56,7 +57,7 @@ sha2 = "0.11.0"
 
 [target."cfg(windows)".dependencies]
 sha2 = "0.11.0"
-windows = { version = "0.62.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Console", "Win32_System_Registry", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
+windows = { version = "0.62.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Console", "Win32_System_Registry", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_System_DataExchange", "Win32_Security"] }
 
 [profile.release]
 lto = "thin"

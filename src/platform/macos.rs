@@ -113,6 +113,11 @@ pub fn accessibility_trusted(prompt: bool) -> bool {
     unsafe { AXIsProcessTrustedWithOptions(opts.as_concrete_TypeRef()) }
 }
 
+/// Windows only (an app run as administrator ignores PoodPim's ⌘V there); never on macOS.
+pub fn foreground_is_elevated() -> bool {
+    false
+}
+
 pub const TALK_KEY_LABEL: &str = "Right ⌥";
 
 /// Where the app's log goes when it isn't started from a terminal.

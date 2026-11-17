@@ -15,7 +15,6 @@ Google
 Microsoft
 Apple
 Amazon
-Facebook
 Instagram
 Netflix
 Nvidia
@@ -458,6 +457,9 @@ Confluence
 Miro
 Visio
 Scrum Master
+CSM
+certificate
+certified
 product backlog
 business analyst
 system analyst

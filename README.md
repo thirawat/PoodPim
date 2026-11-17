@@ -72,7 +72,22 @@ on Windows also Settings › Apps › PoodPim.
 
 The menu-bar / tray icon shows the state (mic = ready, red = listening, amber = transcribing)
 and has: **Local / Serverless** backend, server URL & API key, Thai + English vs Thai-only,
-restore clipboard, paste last transcript, download model.
+restore clipboard, free memory when idle, paste last transcript, download model.
+
+With "Restore clipboard" on (the default), the transcript is marked so clipboard managers
+(Maccy, Paste, Windows clipboard history) skip it, and the previous clipboard is put back
+only if nothing else was copied meanwhile. On macOS every type on the clipboard is kept
+(copied files, rich text, HTML), not only plain text and images. On Windows, when the focused
+app runs as administrator (Windows drops PoodPim's Ctrl+V there), the text is put on the
+clipboard for you to paste, and the overlay says so.
+
+"Free memory when idle" (off by default) frees the local model (~0.75 GB) after 15 minutes
+without dictation. The next press of the talk key records at once and loads the model
+while you speak (about 1–3 s), so only a short sentence waits a little longer.
+
+The model download (~1 GB, from a fixed revision of the Hugging Face repo) carries on where it
+stopped after a dropped connection or a restart of the app, and each file is checked
+against its SHA-256 before use.
 
 ## Backends
 
@@ -142,7 +157,13 @@ alone.
 On tools/asr-eval, against greedy fp32: CER 23.4% vs 25.5%, English words of the subtitles
 found 59% vs 39%; decoding took 1.8× as long, but with the int8 encoder the whole run used
 31% less CPU time. Short words that sound like Thai ones (LINE ~ "ไลน์") cause false matches,
-so the default list leaves them out. Slowing the audio down before decoding did not help.
+so the default list leaves them out (also "Facebook", which turned "เฟส", phase, into
+Facebook). Slowing the audio down before decoding did not help.
+
+A second set, `POODPIM_EVAL_SET=ba` (36 clips of project-management and Agile talks by
+three speakers), has subtitles that are partly machine-made, so its CER is only good for
+comparing conditions: there the default list raises English words found from 33% to 49%
+and CER falls from 28.1% to 26.2%.
 
 ## Build
 

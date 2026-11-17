@@ -14,6 +14,9 @@ pub enum Phase {
     Listening { handsfree: bool },
     Working,
     Done,
+    /// Pasting into the focused app isn't possible (Windows: it runs as administrator):
+    /// the text is on the clipboard for the user to paste.
+    Copied,
     NoSpeech,
     Cancelled,
     Failed,
@@ -30,6 +33,7 @@ impl Phase {
             }
             Phase::Working => "กำลังถอดเสียง…".into(),
             Phase::Done => "✓ พิมพ์แล้ว".into(),
+            Phase::Copied => "คัดลอกไว้แล้ว กด Ctrl+V เอง (แอปนี้รันแบบ Administrator)".into(),
             Phase::NoSpeech => "ไม่ได้ยินเสียงพูด".into(),
             Phase::Cancelled => "ยกเลิกแล้ว".into(),
             Phase::Failed => "ถอดเสียงไม่สำเร็จ (ดูในเมนู)".into(),
@@ -41,7 +45,7 @@ impl Phase {
         match self {
             Phase::Done => Some(Duration::from_millis(900)),
             Phase::NoSpeech | Phase::Cancelled => Some(Duration::from_millis(1200)),
-            Phase::Failed => Some(Duration::from_millis(2500)),
+            Phase::Failed | Phase::Copied => Some(Duration::from_millis(3500)),
             Phase::Ready => Some(Duration::from_millis(3000)),
             _ => None,
         }
@@ -52,6 +56,7 @@ impl Phase {
             Phase::Listening { .. } => [1.0, 0.27, 0.23],
             Phase::Working => [1.0, 0.70, 0.25],
             Phase::Done | Phase::Ready => [0.20, 0.84, 0.29],
+            Phase::Copied => [1.0, 0.70, 0.25],
             Phase::Failed => [1.0, 0.27, 0.23],
             _ => [0.6, 0.6, 0.62],
         }

@@ -4,6 +4,9 @@
   python3 eval.py run NAME [--tempo X] [--thai-only] [--extra ARGS]
   python3 eval.py report NAME...     # compare conditions
 
+POODPIM_EVAL_SET picks the clip set: "tech" (default: a fast Thai/English tech podcast) or
+"ba" (business analysis, project management, Agile: talks and a podcast by five speakers).
+
 Clips: 8-20 s windows of consecutive subtitle cues that contain English words.
 Scores: CER after normalising (spaces/punctuation dropped, lower case, decomposed sara am
 fixed), and recall of the English words of the reference.
@@ -20,11 +23,18 @@ from pathlib import Path
 # yt-dlp, not committed); clips and results are written next to them.
 HERE = Path.cwd()
 SRC = HERE / "src"
-CLIPS = HERE / "clips"
-OUT = HERE / "out"
 POODPIM = Path(__file__).resolve().parents[2] / "target/release/poodpim"
-VIDEOS = ["vDXy4jOh9pk", "RCU2mqtQ-bg"]  # human-made Thai subtitles (checked by eye)
-PER_VIDEO = 30
+# YouTube videos with human-made Thai subtitles (checked by eye against the audio).
+SETS = {
+    "tech": (["vDXy4jOh9pk", "RCU2mqtQ-bg"], 30),
+    "ba": (["BDbn5Cu-gTQ", "s4-eGoCEPj4", "BKlyOpNZvUs"], 12),
+}
+SET = os.environ.get("POODPIM_EVAL_SET", "tech")
+VIDEOS, PER_VIDEO = SETS[SET]
+suffix = "" if SET == "tech" else f"-{SET}"
+CLIPS = HERE / f"clips{suffix}"
+OUT = HERE / f"out{suffix}"
+META = HERE / f"clips{suffix}.json"
 
 
 def ts(s):
@@ -68,8 +78,9 @@ def prepare():
     for vid in VIDEOS:
         cs = cues(SRC / f"{vid}.th.vtt")
         windows = []
-        i = 60  # skip the opening (intro, music)
-        while i < len(cs) - 60:
+        edge = min(60, len(cs) // 10)  # skip the opening (intro, music) and the closing
+        i = edge
+        while i < len(cs) - edge:
             j, start = i, cs[i][0]
             while j < len(cs) and cs[j][1] - start < 8:
                 j += 1
@@ -91,12 +102,12 @@ def prepare():
                 check=True,
             )
             meta.append({"name": name, "start": a, "end": b, "ref": text})
-    (HERE / "clips.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
+    META.write_text(json.dumps(meta, ensure_ascii=False, indent=1))
     print(f"{len(meta)} clips")
 
 
 def run(name, tempo=None, thai_only=False):
-    meta = json.loads((HERE / "clips.json").read_text())
+    meta = json.loads(META.read_text())
     d = OUT / name
     d.mkdir(parents=True, exist_ok=True)
     files = []
@@ -123,7 +134,7 @@ def run(name, tempo=None, thai_only=False):
 
 
 def score(name):
-    meta = json.loads((HERE / "clips.json").read_text())
+    meta = json.loads(META.read_text())
     hyps = json.loads((OUT / name / "hyp.json").read_text())
     rows = []
     for m in meta:
@@ -137,7 +148,7 @@ def score(name):
 
 def hotword_split(name, hot):
     """English recall for words in the hotword list vs the rest."""
-    meta = json.loads((HERE / "clips.json").read_text())
+    meta = json.loads(META.read_text())
     hyps = json.loads((OUT / name / "hyp.json").read_text())
     c = {"in": [0, 0], "out": [0, 0]}
     for m in meta:
