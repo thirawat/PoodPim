@@ -183,6 +183,17 @@ pub fn open_in_editor(path: &std::path::Path) {
     let _ = std::process::Command::new("open").arg("-t").arg(path).spawn();
 }
 
+/// Opens a web page in the default browser.
+pub fn open_url(url: &str) {
+    let _ = std::process::Command::new("open").arg(url).spawn();
+}
+
+/// Shows a folder in Finder.
+pub fn open_folder(path: &std::path::Path) {
+    let _ = std::fs::create_dir_all(path);
+    let _ = std::process::Command::new("open").arg(path).spawn();
+}
+
 /// Opens System Settings › Privacy & Security › Accessibility.
 pub fn open_permission_settings() {
     let _ = std::process::Command::new("open")

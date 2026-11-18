@@ -182,6 +182,17 @@ pub fn open_in_editor(path: &std::path::Path) {
     let _ = std::process::Command::new("notepad.exe").arg(path).spawn();
 }
 
+/// Opens a web page in the default browser (explorer.exe hands a URL to it; no shell).
+pub fn open_url(url: &str) {
+    let _ = std::process::Command::new("explorer.exe").arg(url).spawn();
+}
+
+/// Shows a folder in Explorer.
+pub fn open_folder(path: &std::path::Path) {
+    let _ = std::fs::create_dir_all(path);
+    let _ = std::process::Command::new("explorer.exe").arg(path).spawn();
+}
+
 /// Windows needs no permission for the keyboard hook.
 pub fn open_permission_settings() {}
 

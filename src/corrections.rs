@@ -123,15 +123,16 @@ pub fn replace(text: &str, from: &str, to: &str) -> String {
     out
 }
 
-/// Puts a space between Thai letters and Latin letters that touch ("ต้องhotfixด่วน" →
-/// "ต้อง hotfix ด่วน"): the model often writes them together, and mixed Thai/English text
-/// is easier to read spaced. Digits are left alone ("ข้อ3" and "ข้อ 3" are both usual).
+/// Puts a space between Thai letters and Latin letters or numbers that touch ("ต้องhotfixด่วน"
+/// → "ต้อง hotfix ด่วน", "มี3คน" → "มี 3 คน"): the model often writes them together, and
+/// mixed text is easier to read spaced (Thai style puts spaces around numbers too).
 pub fn space_thai_latin(text: &str) -> String {
+    let latin = |c: char| c.is_ascii_alphanumeric() || c == '%';
     let mut out = String::with_capacity(text.len() + 8);
     let mut prev: Option<char> = None;
     for c in text.chars() {
         if let Some(p) = prev {
-            if (is_thai(p) && c.is_ascii_alphabetic()) || (p.is_ascii_alphabetic() && is_thai(c)) {
+            if (is_thai(p) && latin(c) && c != '%') || (latin(p) && is_thai(c)) {
                 out.push(' ');
             }
         }
@@ -139,6 +140,14 @@ pub fn space_thai_latin(text: &str) -> String {
         prev = Some(c);
     }
     out
+}
+
+/// The last steps for every transcript: the user's corrections, numbers in digits (unless
+/// `digits` is off), then spaces between Thai and Latin letters or numbers.
+pub fn finish(text: &str, fixes: &Corrections, digits: bool) -> String {
+    let text = fixes.apply(text);
+    let text = if digits { crate::numbers::format(&text) } else { text };
+    space_thai_latin(&text)
 }
 
 /// Appends `heard = wanted` to the user's corrections file (menu → Add correction…).
@@ -161,7 +170,8 @@ mod tests {
     #[test]
     fn spaces_thai_and_latin_apart() {
         assert_eq!(space_thai_latin("ต้องhotfixด่วน ที่postคิว L"), "ต้อง hotfix ด่วน ที่ post คิว L");
-        assert_eq!(space_thai_latin("ข้อ3 กับ v2 ใน API ปี2026"), "ข้อ3 กับ v2 ใน API ปี2026", "digits untouched");
+        assert_eq!(space_thai_latin("ข้อ3 กับ v2 ใน API ปี2026"), "ข้อ 3 กับ v2 ใน API ปี 2026");
+        assert_eq!(space_thai_latin("ได้50%แล้ว ม.6"), "ได้ 50% แล้ว ม.6");
         assert_eq!(space_thai_latin("ใช้ GPU กับ CPU"), "ใช้ GPU กับ CPU", "already spaced");
     }
 

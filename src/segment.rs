@@ -72,6 +72,21 @@ fn percentile(v: &[f32], p: f32) -> f32 {
     s[((s.len() - 1) as f32 * p) as usize]
 }
 
+/// Which 20 ms frames of `audio` are silent, by the same measure the cuts use. Empty if the
+/// audio is shorter than one frame.
+pub fn quiet_frames(audio: &[f32], rate: usize) -> Vec<bool> {
+    let frame = rate * FRAME_MS / 1000;
+    let db = frame_db(audio, frame);
+    if db.is_empty() {
+        return Vec::new();
+    }
+    let threshold = (percentile(&db, 0.1) + 8.0).min(percentile(&db, 0.9) - 12.0).max(-60.0);
+    db.iter().map(|&d| d < threshold).collect()
+}
+
+/// Length of a quiet 20 ms frame, in ms.
+pub const QUIET_FRAME_MS: usize = FRAME_MS;
+
 /// Returns a cut position (in samples from the start of `pending`) if a segment is ready.
 fn find_cut(pending: &[f32], rate: usize) -> Option<usize> {
     let frame = rate * FRAME_MS / 1000;

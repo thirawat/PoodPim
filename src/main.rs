@@ -19,7 +19,7 @@ const USAGE: &str = "poodpim — Thai push-to-talk dictation
 USAGE:
   poodpim                         start the tray / menu-bar app
   poodpim transcribe <wav>... [--thai-only] [--server] [--live] [--vocabulary FILE | --no-vocabulary]
-                               [--corrections FILE]
+                               [--corrections FILE] [--no-digits]
                                 --server: send to the configured Lambda instead of the local model
                                 --live:   feed the file in real time like the microphone and report
                                           the wait after release
@@ -27,6 +27,9 @@ USAGE:
                                           `poodpim config`); --no-vocabulary: plain decoding
                                 --corrections: replacements to apply to the text (the app uses
                                           the user's corrections file; the CLI only this one)
+                                --no-digits: leave numbers said in words as words
+  poodpim postprocess [--vocabulary FILE | --no-vocabulary] [--corrections FILE] [--no-digits]
+                               the app's text clean-up on lines from stdin (to compare models)
   poodpim download [--check]      download the OpenThai ASR model (~1 GB)
   poodpim backend local|lambda    choose where speech is transcribed
   poodpim server <url>            set the Lambda Function URL; reads the API key from stdin
@@ -44,6 +47,7 @@ fn main() -> Result<()> {
     match args.first().map(String::as_str) {
         None | Some("run") => app::run(),
         Some("transcribe") => transcribe(&args[1..]),
+        Some("postprocess") => postprocess(&args[1..]),
         Some("download") if args.get(1).map(String::as_str) == Some("--check") => {
             for (f, size) in model::remote_sizes()? {
                 println!("{f}\t{:.1} MB", size as f64 / 1e6);
@@ -98,6 +102,31 @@ fn show_config(cfg: &Config) {
     println!("api_key:    {key}");
     println!("vocabulary: {}", poodpim::hotwords::user_file().display());
     println!("corrections: {}", poodpim::corrections::user_file().display());
+}
+
+/// Applies the app's text clean-up to lines of text from stdin (to compare other models'
+/// output on equal terms): Thai-spelled acronyms, the vocabulary's spelling, corrections
+/// (`--corrections FILE`) and Thai/Latin spacing.
+fn postprocess(args: &[String]) -> Result<()> {
+    use std::io::BufRead;
+    let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1));
+    let vocab_text = match arg("--vocabulary") {
+        Some(f) => std::fs::read_to_string(f)?,
+        None if args.iter().any(|a| a == "--no-vocabulary") => String::new(),
+        None => poodpim::hotwords::read_user_list().0,
+    };
+    let vocabulary = poodpim::hotwords::Hotwords::new(&vocab_text);
+    let fixes = match arg("--corrections") {
+        Some(f) => poodpim::corrections::Corrections::new(&std::fs::read_to_string(f)?),
+        None => poodpim::corrections::Corrections::default(),
+    };
+    for line in std::io::stdin().lock().lines() {
+        let text = line?.replace("\u{0E4D}\u{0E32}", "\u{0E33}");
+        let text = poodpim::hotwords::thai_acronyms_to_latin(&text);
+        let text = vocabulary.canonical_case(&vocabulary.fix_doubled_letters(&text));
+        println!("{}", poodpim::corrections::finish(text.trim(), &fixes, !args.iter().any(|a| a == "--no-digits")));
+    }
+    Ok(())
 }
 
 fn transcribe(args: &[String]) -> Result<()> {
@@ -187,7 +216,7 @@ fn transcribe(args: &[String]) -> Result<()> {
             out.segments,
             if live { "after release " } else { "" },
             wait.as_secs_f32(),
-            poodpim::corrections::space_thai_latin(&fixes.apply(&out.text))
+            poodpim::corrections::finish(&out.text, &fixes, !args.iter().any(|a| a == "--no-digits"))
         );
         for e in &out.errors {
             eprintln!("segment error: {e}");
@@ -225,7 +254,7 @@ fn download() -> Result<()> {
     println!("downloading to {}", dir.display());
     let last = std::cell::Cell::new(0u64);
     model::download(&dir, &|done, total| {
-        let pct = if total > 0 { done * 100 / total } else { 0 };
+        let pct = (done * 100).checked_div(total).unwrap_or(0);
         if pct != last.get() {
             last.set(pct);
             eprint!("\r{pct:3}%  {:.2} / {:.2} GB", done as f64 / 1e9, total as f64 / 1e9);

@@ -27,6 +27,8 @@ pub struct Config {
     pub restore_clipboard: bool,
     /// Start the app when the user logs in (macOS LaunchAgent / Windows Run key).
     pub start_at_login: bool,
+    /// Write numbers said in words as digits ("สองร้อยห้าสิบ" → "250"), see numbers.rs.
+    pub numbers_as_digits: bool,
     /// Free the local model's memory (~0.75 GB) after a while without dictation; it loads
     /// again, while the user speaks, on the next press of the talk key.
     pub unload_when_idle: bool,
@@ -43,6 +45,7 @@ impl Default for Config {
             mixed_english: true,
             restore_clipboard: true,
             start_at_login: true,
+            numbers_as_digits: true,
             unload_when_idle: false,
             model_upgrade_declined: false,
         }

@@ -55,9 +55,9 @@ Files fetched this way aren't quarantined, so macOS doesn't ask to "Open Anyway"
 Windows SmartScreen doesn't stop the unsigned exe. The zips on the
 [releases page](https://github.com/thirawat/PoodPim/releases) work too, with those prompts.
 
-**Updates:** the app checks GitHub once a day and asks before updating (menu → Check for
+**Updates:** the app checks GitHub once a day and asks before updating (Settings → Check for
 updates…). A release candidate also picks up newer release candidates.
-**Uninstall:** menu → Uninstall PoodPim… (asks whether to keep the downloaded model), or
+**Uninstall:** Settings → Uninstall… (asks whether to keep the downloaded model), or
 `curl -fsSL https://raw.githubusercontent.com/thirawat/PoodPim/main/uninstall.sh | sh`;
 on Windows also Settings › Apps › PoodPim.
 
@@ -70,9 +70,37 @@ on Windows also Settings › Apps › PoodPim.
 | Cancel | Esc | Esc |
 | Paste | ⌘V (clipboard restored after) | Ctrl+V (clipboard restored after) |
 
-The menu-bar / tray icon shows the state (mic = ready, red = listening, amber = transcribing)
-and has: **Local / Serverless** backend, server URL & API key, Thai + English vs Thai-only,
-restore clipboard, free memory when idle, paste last transcript, download model.
+The menu-bar / tray icon shows the state (mic = ready, red = listening, amber = transcribing).
+Its menu keeps the everyday actions: paste last transcript, **Recent** (the last 10
+transcripts, kept in memory only, each with Paste and "Fix a word…", which opens "Add
+correction…" filled with that transcript), Add correction…, and **Settings…**. "Open
+Accessibility settings…" and "Download model" appear only while needed.
+
+**Settings…** opens a window ([assets/settings.html](assets/settings.html) in the system
+webview: WKWebView on macOS, WebView2 on Windows, built into Windows 11 and installed with
+Edge on Windows 10; without it the app offers Microsoft's download page) with: Local /
+Serverless backend with the server URL and API key, Thai + English vs Thai-only, numbers as
+digits, the vocabulary and corrections files (with their counts and an inline "add
+correction"), restore clipboard, free memory when idle, start at login, updates, the log
+folder, and uninstall. On macOS the app gets a Dock icon and an Edit menu (⌘C / ⌘V in the
+fields) only while the window is open.
+
+Numbers said in words become digits ("สองร้อยห้าสิบ" → 250, "สามจุดสอง" → 3.2,
+"ห้าสิบเปอร์เซ็นต์" → 50%), carefully: a lone number word only after a word that asks for a
+number (ข้อ, เวอร์ชัน, ครั้งที่…) or a Latin word, digits said one by one only from six (or
+from three starting with ศูนย์), and words like สามารถ, ห้าม, เรียบร้อย are protected
+([src/numbers.rs](src/numbers.rs)). Run over 5,583 lines of human-written Thai subtitles it
+changed no ordinary word. Numbers and Latin words get spaces around them in Thai text.
+
+Thai marks the end of a clause with a space rather than punctuation, and the model writes
+none, so a pause between two Thai words becomes a space (not before an ending particle such
+as ครับ or นะ: "ยังไง นะครับ" reads wrong). A pause needs both: the model waited 0.64 s or more
+between the two pieces (the decoder keeps the frame each piece was emitted on), and the audio
+in between has 0.5 s or more of silence (a long wait alone is sometimes the model emitting
+late). Subtitle spaces follow line wraps, sometimes mid-word, so they could not be used to
+tune it; by eye on the BA clips, 0.3 s of silence also spaced thinking pauses inside phrases,
+0.5 s kept mostly clause breaks. `POODPIM_PAUSE_FRAMES` (80 ms each, 0 = off) and
+`POODPIM_PAUSE_MS` override them for testing.
 
 With "Restore clipboard" on (the default), the transcript is marked so clipboard managers
 (Maccy, Paste, Windows clipboard history) skip it, and the previous clipboard is put back
@@ -135,7 +163,7 @@ as accurate (CER 26.0% vs 25.5%, within noise) with 0.99 GB instead of 2.64 GB o
 The model hears many English words in Thai speech but spells them by ear ("จีพียู",
 "เอ็นเดีย"). Two things help, both in Thai + English mode:
 
-- **Hotwords.** Words in the user's vocabulary file (menu → My vocabulary…; created from
+- **Hotwords.** Words in the user's vocabulary file (Settings → My vocabulary; created from
   [assets/vocabulary.txt](assets/vocabulary.txt), ~340 tech terms and words Thai developers say in English) are favoured while
   decoding: beam search (6 hypotheses, batched into one decoder call per step, up to 3 pieces
   per 80 ms frame) over a character trie of the terms, so any way the model splits a word into
@@ -144,7 +172,7 @@ The model hears many English words in Thai speech but spells them by ear ("จ�
   `x-poodpim-vocabulary` header. An empty list means plain greedy decoding.
 - **Acronyms.** Tech acronyms spelled in Thai are written in Latin ("จีพียู" → "GPU").
 - **Word corrections.** Words the model keeps hearing the same wrong way, or Thai spellings
-  someone wants in English, are replaced after decoding (menu → Word corrections…; lines
+  someone wants in English, are replaced after decoding (Settings → corrections; lines
   `heard, heard = wanted`; started from [assets/corrections.txt](assets/corrections.txt),
   dev terms such as "เดฟออฟ, depop = DevOps"). Applied in the app, so it works with either
   backend; longest match first; Latin words match whole words only; a Latin replacement
@@ -182,11 +210,11 @@ cargo build --release --no-default-features --features lambda --bin poodpim-lamb
 `Contents/Resources/preset.json` (local backend, no server URL or API key), which
 becomes the recipient's config on first launch, so the app offers to download the model
 right away. The zips may be published, so to share a serverless backend give people the API
-URL and key separately (everyone shares one key; menu → Server URL & API key…); the app
+URL and key separately (everyone shares one key; Settings → Serverless); the app
 asks for the key again if the server rejects it. To cut access, rotate the key
 ([deploy/lambda/README.md](deploy/lambda/README.md)) and send people the new one.
 
-The app starts at login by default (menu → Start at login; a LaunchAgent in
+The app starts at login by default (Settings → start at login; a LaunchAgent in
 `~/Library/LaunchAgents/local.poodpim.app.plist` on macOS, the `HKCU\…\Run` registry key on
 Windows), pointing at wherever it was last started from.
 

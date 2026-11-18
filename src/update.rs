@@ -382,8 +382,9 @@ mod win {
                 remove_all_you_can(&e.path());
             }
         }
-        if let Some(logs) = crate::platform::log_dir() {
-            remove_all_you_can(&logs);
+        // %LOCALAPPDATA%\poodpim: the logs and the Settings window's WebView2 data.
+        if let Some(local) = dirs::data_local_dir() {
+            remove_all_you_can(&crate::model::app_dir(Some(local)));
         }
 
         let tmp = std::env::temp_dir();

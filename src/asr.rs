@@ -16,10 +16,68 @@ const PROMPT_THAI_ENGLISH: i64 = 63;
 const ENC_DIM: usize = 1024;
 const STATE_LEN: usize = 2 * 640; // [2, 1, 640]
 const MAX_SYMBOLS_PER_FRAME: usize = 10;
+/// Default for `pause_frames` (80 ms each), tuned on tools/asr-eval (see README).
+const PAUSE_FRAMES: u32 = 8;
+
+/// The shortest silence (ms) that makes a pause between two words. On the BA clips: 300 ms
+/// also spaced thinking pauses inside phrases ("มีการ มีประสบการณ์"); 500 ms kept mostly the
+/// breaks between clauses; 700 ms left almost none. POODPIM_PAUSE_MS overrides it for tuning.
+const PAUSE_MS: usize = 500;
+
+/// Whether the audio between encoder frames `a` and `b` (80 ms each) holds a silence of
+/// PAUSE_MS or more. The model emits a piece a little after it is heard, so the window starts
+/// 160 ms before `a`.
+fn silence_between(quiet: &[bool], a: u32, b: u32) -> bool {
+    let q = crate::segment::QUIET_FRAME_MS;
+    let from = ((a as usize * 80).saturating_sub(160) / q).min(quiet.len());
+    let to = ((b as usize * 80) / q).min(quiet.len());
+    let ms = std::env::var("POODPIM_PAUSE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(PAUSE_MS);
+    let need = ms.div_ceil(q);
+    let mut run = 0;
+    for &s in &quiet[from..to] {
+        run = if s { run + 1 } else { 0 };
+        if run >= need {
+            return true;
+        }
+    }
+    false
+}
+
+/// Marks a pause in the text while it is put together (see `pause_spaces`).
+const PAUSE: char = '\u{1F}';
+
+/// Ending particles: a pause before them is the speaker trailing off, not a new clause
+/// ("ยังไง นะครับ" reads wrong), so no space goes there.
+const PARTICLES: &[&str] = &[
+    "ครับ", "ค่ะ", "คะ", "ค่า", "นะ", "น่ะ", "ฮะ", "ฮับ", "เนี่ย", "อะ", "อ่ะ", "จ้ะ", "จ้า", "แหละ", "ล่ะ", "มั้ย", "ไหม", "เหรอ", "หรอ",
+];
+
+/// Turns pause marks into spaces, except before an ending particle.
+fn pause_spaces(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(PAUSE) {
+        out.push_str(&rest[..i]);
+        rest = &rest[i + PAUSE.len_utf8()..];
+        if !PARTICLES.iter().any(|p| rest.starts_with(p)) {
+            out.push(' ');
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A Thai character a word can start with: not a vowel sign or tone mark that belongs to the
+/// letter before it, and not ๆ (it repeats the word before).
+fn starts_thai_word(c: char) -> bool {
+    ('\u{0E01}'..='\u{0E30}').contains(&c) && c != '\u{0E30}' || ('\u{0E40}'..='\u{0E44}').contains(&c)
+}
 
 #[derive(Clone)]
 struct Hyp {
     tokens: Vec<usize>,
+    /// The encoder frame (80 ms) each token was emitted on.
+    frames: Vec<u32>,
     last: i32,
     s1: Vec<f32>,
     s2: Vec<f32>,
@@ -66,6 +124,8 @@ pub struct OpenThaiAsr {
     beam: usize,
     bonus: f32,
     beam_blank_bias: f32,
+    /// Silence between two tokens, in 80 ms frames, that becomes a space (0 = off).
+    pause_frames: u32,
 }
 
 impl OpenThaiAsr {
@@ -111,7 +171,8 @@ impl OpenThaiAsr {
         let beam = env_n("POODPIM_BEAM", 6);
         let bonus = envf("POODPIM_BONUS", 2.0);
         let beam_blank_bias = envf("POODPIM_BEAM_BLANK_BIAS", -0.5);
-        let mut asr = Self { _env: env, encoder, decoder, tokens, blank, beam, bonus, beam_blank_bias };
+        let pause_frames = env_n("POODPIM_PAUSE_FRAMES", PAUSE_FRAMES as usize) as u32;
+        let mut asr = Self { _env: env, encoder, decoder, tokens, blank, beam, bonus, beam_blank_bias, pause_frames };
         // ONNX Runtime is slow on its first runs (allocations, kernel set-up); warm it up
         // so the first real dictation is fast.
         let noise: Vec<f32> = (0..SAMPLE_RATE as usize * 3).map(|i| ((i * 7919 % 1000) as f32 / 1000.0 - 0.5) * 0.01).collect();
@@ -145,7 +206,7 @@ impl OpenThaiAsr {
         let t_enc = t_start.elapsed();
 
         let short = audio.len() < 2 * SAMPLE_RATE as usize;
-        let ids = if self.beam > 0 && !short && mixed_english && !vocabulary.is_empty() {
+        let (ids, at) = if self.beam > 0 && !short && mixed_english && !vocabulary.is_empty() {
             self.beam_search(&encoded, frames, self.beam, self.beam_blank_bias, vocabulary)?
         } else {
             self.greedy(&encoded, frames, if short { -2.5 } else { -1.0 })?
@@ -153,15 +214,17 @@ impl OpenThaiAsr {
         if std::env::var_os("POODPIM_TIMING").is_some() {
             eprintln!("mel {:?} enc {:?} dec {:?} frames {frames} tokens {}", t_mel, t_enc - t_mel, t_start.elapsed() - t_enc, ids.len());
         }
-        Ok(self.detokenize(&ids, vocabulary))
+        let quiet = if self.pause_frames > 0 { crate::segment::quiet_frames(audio, SAMPLE_RATE as usize) } else { Vec::new() };
+        Ok(self.detokenize(&ids, &at, &quiet, vocabulary))
     }
 
-    fn greedy(&mut self, enc: &[f32], frames: usize, blank_bias: f32) -> Result<Vec<usize>> {
+    fn greedy(&mut self, enc: &[f32], frames: usize, blank_bias: f32) -> Result<(Vec<usize>, Vec<u32>)> {
         let mut s1 = vec![0.0f32; STATE_LEN];
         let mut s2 = vec![0.0f32; STATE_LEN];
         let mut last = [self.blank as i32];
         let one = [1i32];
         let mut out = Vec::new();
+        let mut at = Vec::new();
         for t in 0..frames {
             let frame = &enc[t * ENC_DIM..(t + 1) * ENC_DIM]; // [1, 1024, 1]
             for _ in 0..MAX_SYMBOLS_PER_FRAME {
@@ -186,12 +249,13 @@ impl OpenThaiAsr {
                     break;
                 }
                 out.push(best);
+                at.push(t as u32);
                 last[0] = best as i32;
                 s1.copy_from_slice(res["output_states_1"].try_extract_tensor::<f32>()?.1);
                 s2.copy_from_slice(res["output_states_2"].try_extract_tensor::<f32>()?.1);
             }
         }
-        Ok(out)
+        Ok((out, at))
     }
 
     /// Beam search over the RNN-T, with hotword biasing: each piece that continues a hotword
@@ -199,10 +263,11 @@ impl OpenThaiAsr {
     /// decoder in one batched call; scores are log-softmax. A hypothesis may emit up to
     /// `BEAM_SYMBOLS_PER_FRAME` pieces in one 80 ms frame (fast speech needs more than one;
     /// with a single one, letters went missing), but only while it can still make the beam.
-    fn beam_search(&mut self, enc: &[f32], frames: usize, beam: usize, blank_bias: f32, hw: &Hotwords) -> Result<Vec<usize>> {
+    fn beam_search(&mut self, enc: &[f32], frames: usize, beam: usize, blank_bias: f32, hw: &Hotwords) -> Result<(Vec<usize>, Vec<u32>)> {
         const BEAM_SYMBOLS_PER_FRAME: usize = 3;
         let mut hyps = vec![Hyp {
             tokens: Vec::new(),
+            frames: Vec::new(),
             last: self.blank as i32,
             s1: vec![0.0; STATE_LEN],
             s2: vec![0.0; STATE_LEN],
@@ -218,7 +283,7 @@ impl OpenThaiAsr {
                 if active.is_empty() {
                     break;
                 }
-                let expanded = self.expand(frame, &active, beam, blank_bias, hw)?;
+                let expanded = self.expand(frame, t as u32, &active, beam, blank_bias, hw)?;
                 let mut going_on = Vec::new();
                 for (h, emitted) in expanded {
                     if emitted { going_on.push(h) } else { ended.push(h) }
@@ -238,14 +303,14 @@ impl OpenThaiAsr {
         let best = hyps
             .into_iter()
             .max_by(|a, b| (a.score - hw.pending(a.ctx)).total_cmp(&(b.score - hw.pending(b.ctx))))
-            .map(|h| h.tokens)
+            .map(|h| (h.tokens, h.frames))
             .unwrap_or_default();
         Ok(best)
     }
 
     /// One decoder call for all `hyps` on `frame`: for each, the blank extension (emitted =
     /// false, same state) and the `beam` best pieces (emitted = true, new state).
-    fn expand(&mut self, frame: &[f32], hyps: &[Hyp], beam: usize, blank_bias: f32, hw: &Hotwords) -> Result<Vec<(Hyp, bool)>> {
+    fn expand(&mut self, frame: &[f32], t: u32, hyps: &[Hyp], beam: usize, blank_bias: f32, hw: &Hotwords) -> Result<Vec<(Hyp, bool)>> {
         let b = hyps.len();
         let half = STATE_LEN / 2;
         let vocab = self.blank + 1;
@@ -304,19 +369,58 @@ impl OpenThaiAsr {
                 let (ctx, delta) = hw.advance(h.ctx, &self.tokens[k], self.bonus);
                 let mut tokens = h.tokens.clone();
                 tokens.push(k);
+                let mut frames = h.frames.clone();
+                frames.push(t);
                 let score = h.score + v - lse - blank_bias + delta;
-                out.push((Hyp { tokens, last: k as i32, s1: n1.clone(), s2: n2.clone(), score, ctx }, true));
+                out.push((Hyp { tokens, frames, last: k as i32, s1: n1.clone(), s2: n2.clone(), score, ctx }, true));
             }
         }
         Ok(out)
     }
 
-    fn detokenize(&self, ids: &[usize], vocabulary: &Hotwords) -> String {
-        let text: String = ids.iter().filter_map(|&i| self.tokens.get(i)).map(String::as_str).collect();
+    /// Token pieces to text. A pause between two Thai pieces becomes a space (Thai marks the end
+    /// of a clause with a space, not punctuation): the model waited `pause_frames` or more
+    /// between them, and the audio in between has a silence of PAUSE_MS or more (a long wait
+    /// alone is sometimes just the model emitting late). `quiet`: silent 20 ms frames.
+    fn detokenize(&self, ids: &[usize], at: &[u32], quiet: &[bool], vocabulary: &Hotwords) -> String {
+        let mut text = String::new();
+        for (k, piece) in ids.iter().filter_map(|&i| self.tokens.get(i)).enumerate() {
+            if k > 0 && self.pause_frames > 0 && at[k].saturating_sub(at[k - 1]) >= self.pause_frames && silence_between(quiet, at[k - 1], at[k]) {
+                let next = piece.chars().next();
+                let prev = text.chars().next_back();
+                if next.is_some_and(starts_thai_word) && prev.is_some_and(|c| ('\u{0E01}'..='\u{0E5B}').contains(&c)) {
+                    text.push(PAUSE);
+                }
+            }
+            text.push_str(piece);
+        }
+        let text = pause_spaces(&text);
         // The vocabulary spells sara am as nikhahit + sara aa (U+0E4D U+0E32); use the
         // single code point U+0E33 (ำ) so search and spell-check work on the result.
         let text = text.replace('\u{2581}', " ").replace("\u{0E4D}\u{0E32}", "\u{0E33}");
         let text = crate::hotwords::thai_acronyms_to_latin(&text);
         vocabulary.canonical_case(&vocabulary.fix_doubled_letters(&text)).trim().to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pauses_become_spaces_but_not_before_particles() {
+        let p = PAUSE;
+        assert_eq!(pause_spaces(&format!("ข้อสามคือ{p}ยอดขาย")), "ข้อสามคือ ยอดขาย");
+        assert_eq!(pause_spaces(&format!("ยังไง{p}นะครับ{p}แน่นอน")), "ยังไงนะครับ แน่นอน");
+    }
+
+    #[test]
+    fn a_pause_needs_real_silence() {
+        // 20 ms frames: speech for 1 s, silence for 0.6 s, speech again.
+        let quiet: Vec<bool> = (0..130).map(|i| (50..80).contains(&i)).collect();
+        assert!(silence_between(&quiet, 10, 20), "0.6 s of silence between 0.8 s and 1.6 s");
+        assert!(!silence_between(&quiet, 2, 8), "speech only");
+        let short: Vec<bool> = (0..130).map(|i| (50..60).contains(&i)).collect();
+        assert!(!silence_between(&short, 10, 20), "0.2 s is a breath, not a pause");
     }
 }

@@ -9,6 +9,7 @@ pub mod audio;
 pub mod features;
 pub mod hotwords;
 pub mod model;
+pub mod numbers;
 pub mod pipeline;
 pub mod segment;
 
@@ -24,5 +25,7 @@ pub mod overlay;
 pub mod platform;
 #[cfg(feature = "desktop")]
 pub mod remote;
+#[cfg(feature = "desktop")]
+pub mod settings;
 #[cfg(feature = "desktop")]
 pub mod update;

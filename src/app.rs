@@ -14,9 +14,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tao::event::{Event, StartCause};
-use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tao::event::{Event, StartCause, WindowEvent};
+use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget};
+use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::asr::OpenThaiAsr;
@@ -36,6 +36,8 @@ const TAP: Duration = Duration::from_millis(300);
 const MAX_RECORDING: Duration = Duration::from_secs(10 * 60);
 /// How often the recording is checked for a finished segment.
 const POLL: Duration = Duration::from_millis(250);
+/// How many transcripts the Recent menu keeps (in memory only, gone when the app quits).
+const RECENT: usize = 10;
 /// Recording goes on this long after the talk key is let go: people let go while saying the
 /// last syllable (fast speakers especially), and the sound card still holds a bit of audio.
 const TAIL: Duration = Duration::from_millis(200);
@@ -55,6 +57,8 @@ enum UserEvent {
     Hotkey(HotkeyEvent, Instant),
     Menu(MenuEvent),
     ModelLoaded(u64, Result<Arc<Mutex<OpenThaiAsr>>, String>),
+    /// A message from the Settings window's page (JSON, see assets/settings.html).
+    Settings(String),
     /// The model freed when idle was loaded again for a recording (see `asleep`).
     ModelWoke(u64, Result<Arc<Mutex<OpenThaiAsr>>, String>),
     Transcribed(u64, Outcome),
@@ -95,23 +99,18 @@ enum State {
 
 struct Ui {
     tray: TrayIcon,
+    menu: Menu,
     status: MenuItem,
-    local: CheckMenuItem,
-    lambda: CheckMenuItem,
-    server_settings: MenuItem,
-    mixed: CheckMenuItem,
-    vocabulary: MenuItem,
-    corrections: MenuItem,
-    add_correction: MenuItem,
-    restore: CheckMenuItem,
-    unload: CheckMenuItem,
-    autostart: CheckMenuItem,
-    paste_last: MenuItem,
-    download: MenuItem,
     permission: MenuItem,
-    check_update: MenuItem,
-    uninstall: MenuItem,
+    paste_last: MenuItem,
+    recent: Submenu,
+    add_correction: MenuItem,
+    settings: MenuItem,
+    download: MenuItem,
     quit: MenuItem,
+    /// Whether `permission` / `download` are in the menu now (only while they are needed).
+    shown_permission: std::cell::Cell<bool>,
+    shown_download: std::cell::Cell<bool>,
 }
 
 struct App {
@@ -132,6 +131,25 @@ struct App {
     stop_at: Option<Instant>,
     handsfree: bool,
     last_text: String,
+    /// The last RECENT transcripts, newest first (menu › Recent). Never written anywhere.
+    recent: std::collections::VecDeque<String>,
+    /// The Recent menu must be rebuilt (a transcript was added).
+    recent_dirty: bool,
+    /// Recent menu entries: (Paste id, Fix a word id), in the order of `recent`.
+    recent_ids: Vec<(MenuId, MenuId)>,
+    recent_entries: Vec<Submenu>,
+    /// The Settings window, while open.
+    settings: Option<crate::settings::SettingsWindow>,
+    /// Open / close the Settings window on the next turn of the event loop (it needs the
+    /// event loop's window target).
+    want_settings: bool,
+    settings_close: bool,
+    /// macOS: the app menu with Edit (⌘C / ⌘V in the Settings fields) while Settings is open.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    edit_menu: Option<Menu>,
+    /// Entries in the user's vocabulary and corrections files (shown in Settings).
+    vocab_count: usize,
+    corrections_count: usize,
     status_text: String,
     warm: Option<JoinHandle<()>>,
     segmenter: Option<Segmenter>,
@@ -256,6 +274,16 @@ pub fn run() -> Result<()> {
         stop_at: None,
         handsfree: false,
         last_text: String::new(),
+        recent: Default::default(),
+        recent_dirty: false,
+        recent_ids: Vec::new(),
+        recent_entries: Vec::new(),
+        settings: None,
+        want_settings: false,
+        settings_close: false,
+        edit_menu: None,
+        vocab_count: 0,
+        corrections_count: 0,
         status_text: String::new(),
         warm: None,
         segmenter: None,
@@ -287,7 +315,7 @@ pub fn run() -> Result<()> {
     app.reload_vocabulary();
     let mut ui: Option<Ui> = None;
 
-    event_loop.run(move |event, _, control_flow| {
+    event_loop.run(move |event, target, control_flow| {
         if app.state == State::Recording && app.stop_at.is_some_and(|t| Instant::now() >= t) {
             app.stop_at = None;
             app.finish();
@@ -306,7 +334,7 @@ pub fn run() -> Result<()> {
         let animating = app.overlay.tick();
         match event {
             Event::NewEvents(StartCause::Init) => {
-                ui = Some(build_ui(&app.cfg));
+                ui = Some(build_ui());
                 let p = proxy.clone();
                 platform::spawn_hotkey_listener(Box::new(move |e| {
                     let _ = p.send_event(UserEvent::Hotkey(e, Instant::now()));
@@ -315,6 +343,8 @@ pub fn run() -> Result<()> {
                     eprintln!("Accessibility permission is needed: System Settings › Privacy & Security › Accessibility");
                 }
                 app.apply_autostart();
+                // For testing the Settings window without the tray menu.
+                app.want_settings = std::env::var_os("POODPIM_OPEN_SETTINGS").is_some();
                 Recorder::warm_up();
                 app.start_backend();
                 // First launch in Local mode: ask about the model now, not on the first key press.
@@ -349,34 +379,20 @@ pub fn run() -> Result<()> {
                     if id == ui.quit.id() {
                         *control_flow = ControlFlow::Exit;
                         return;
-                    } else if id == ui.local.id() {
-                        app.switch_backend(Backend::Local);
-                    } else if id == ui.lambda.id() {
-                        app.switch_backend(Backend::Lambda);
-                    } else if id == ui.server_settings.id() {
-                        app.open_server_settings();
-                    } else if id == ui.vocabulary.id() {
-                        app.reload_vocabulary(); // creates the file on first use
-                        platform::open_in_editor(&hotwords::user_file());
+                    } else if id == ui.settings.id() {
+                        app.want_settings = true;
+                    } else if let Some(k) = app.recent_ids.iter().position(|(p, f)| p == id || f == id) {
+                        let text = app.recent[k].clone();
+                        if app.recent_ids[k].0 == *id {
+                            if app.paste(text) == Phase::Copied {
+                                app.overlay.set(Phase::Copied);
+                            }
+                        } else {
+                            app.ask_correction(&text);
+                        }
                     } else if id == ui.add_correction.id() {
-                        app.ask_correction();
-                    } else if id == ui.corrections.id() {
-                        app.reload_vocabulary();
-                        platform::open_in_editor(&corrections::user_file());
-                    } else if id == ui.mixed.id() {
-                        app.cfg.mixed_english = ui.mixed.is_checked();
-                        app.cfg.save();
-                    } else if id == ui.autostart.id() {
-                        app.cfg.start_at_login = ui.autostart.is_checked();
-                        app.cfg.save();
-                        app.apply_autostart();
-                    } else if id == ui.unload.id() {
-                        app.cfg.unload_when_idle = ui.unload.is_checked();
-                        app.cfg.save();
-                        app.last_used = Instant::now();
-                    } else if id == ui.restore.id() {
-                        app.cfg.restore_clipboard = ui.restore.is_checked();
-                        app.cfg.save();
+                        let last = app.last_text.clone();
+                        app.ask_correction(&last);
                     } else if id == ui.paste_last.id() {
                         if app.paste(app.last_text.clone()) == Phase::Copied {
                             app.overlay.set(Phase::Copied);
@@ -385,10 +401,6 @@ pub fn run() -> Result<()> {
                         app.start_download();
                     } else if id == ui.permission.id() {
                         platform::open_permission_settings();
-                    } else if id == ui.check_update.id() {
-                        app.check_update();
-                    } else if id == ui.uninstall.id() {
-                        app.ask_uninstall();
                     }
                 } else {
                     app.handle(ev);
@@ -397,8 +409,22 @@ pub fn run() -> Result<()> {
                     app.refresh(ui);
                 }
             }
+            Event::WindowEvent { window_id, event: WindowEvent::CloseRequested, .. }
+                if app.settings.as_ref().is_some_and(|w| w.id() == window_id) =>
+            {
+                app.settings_close = true;
+            }
             _ => {}
         }
+        if app.want_settings {
+            app.want_settings = false;
+            app.open_settings(target);
+        }
+        if app.settings_close {
+            app.settings_close = false;
+            app.close_settings(target);
+        }
+        app.show_settings_state();
         if app.quit {
             *control_flow = ControlFlow::Exit;
             return;
@@ -416,39 +442,23 @@ pub fn run() -> Result<()> {
     })
 }
 
-fn build_ui(cfg: &Config) -> Ui {
+fn build_ui() -> Ui {
     let status = MenuItem::new("Loading…", false, None);
-    let local = CheckMenuItem::new("Local (this computer)", true, cfg.backend == Backend::Local, None);
-    let lambda = CheckMenuItem::new("Serverless (AWS Lambda)", true, cfg.backend == Backend::Lambda, None);
-    let server_settings = MenuItem::new("Server URL && API key…", true, None);
-    let mixed = CheckMenuItem::new("Thai + English (mixed)", true, cfg.mixed_english, None);
-    let vocabulary = MenuItem::new("My vocabulary…", true, None);
-    let corrections = MenuItem::new("Word corrections…", true, None);
-    let add_correction = MenuItem::new("Add correction…", true, None);
-    let restore = CheckMenuItem::new("Restore clipboard after paste", true, cfg.restore_clipboard, None);
-    let unload = CheckMenuItem::new("Free memory when idle (15 min)", true, cfg.unload_when_idle, None);
-    let autostart = CheckMenuItem::new("Start at login", true, cfg.start_at_login, None);
+    let permission = MenuItem::new("⚠ Open Accessibility settings…", true, None);
     let paste_last = MenuItem::new("Paste last transcript", false, None);
-    let download = MenuItem::new("Download model (1 GB)", false, None);
+    let recent = Submenu::new("Recent", false);
+    let add_correction = MenuItem::new("Add correction…", true, None);
+    let settings = MenuItem::new("Settings…", true, None);
+    let download = MenuItem::new("Download model (1 GB)", true, None);
     let hint = MenuItem::new(format!("Hold {TALK_KEY_LABEL} to talk · tap = hands-free · Esc = cancel"), false, None);
-    let permission = MenuItem::new("Open Accessibility settings…", false, None);
-    let version = MenuItem::new(format!("PoodPim {}", update::CURRENT), false, None);
-    let check_update = MenuItem::new("Check for updates…", true, None);
-    let uninstall = MenuItem::new("Uninstall PoodPim…", true, None);
     let quit = MenuItem::new("Quit PoodPim", true, None);
     let menu = Menu::new();
-    let seps: Vec<PredefinedMenuItem> = (0..5).map(|_| PredefinedMenuItem::separator()).collect();
-    menu.append_items(&[
-        &status, &permission, &seps[0], &local, &lambda, &server_settings, &seps[1], &mixed, &vocabulary, &corrections, &add_correction, &restore, &unload, &autostart, &paste_last, &download,
-        &seps[2], &hint, &seps[3],
-    ])
-    .expect("menu");
-    if update::supported() {
-        menu.append_items(&[&version, &check_update, &uninstall, &seps[4]]).expect("menu");
-    }
-    menu.append(&quit).expect("menu");
+    let seps: Vec<PredefinedMenuItem> = (0..3).map(|_| PredefinedMenuItem::separator()).collect();
+    // The permission and download items go in only while needed (see refresh).
+    menu.append_items(&[&status, &seps[0], &paste_last, &recent, &add_correction, &seps[1], &settings, &seps[2], &hint, &quit])
+        .expect("menu");
     let (icon, template) = icon_for(State::Loading);
-    let builder = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("PoodPim — Thai dictation");
+    let builder = TrayIconBuilder::new().with_menu(Box::new(menu.clone())).with_tooltip("PoodPim — Thai dictation");
     #[cfg(target_os = "macos")]
     let builder = if template { builder.with_icon_templated(icon) } else { builder.with_icon(icon) };
     #[cfg(not(target_os = "macos"))]
@@ -457,7 +467,20 @@ fn build_ui(cfg: &Config) -> Ui {
         builder.with_icon(icon)
     };
     let tray = builder.build().expect("tray icon");
-    Ui { tray, status, local, lambda, server_settings, mixed, vocabulary, corrections, add_correction, restore, unload, autostart, paste_last, download, permission, check_update, uninstall, quit }
+    Ui {
+        tray,
+        menu,
+        status,
+        permission,
+        paste_last,
+        recent,
+        add_correction,
+        settings,
+        download,
+        quit,
+        shown_permission: Default::default(),
+        shown_download: Default::default(),
+    }
 }
 
 impl App {
@@ -551,7 +574,7 @@ impl App {
         std::thread::spawn(move || {
             let yes = platform::confirm(
                 "ยังไม่มีโมเดลถอดเสียงในเครื่องนี้\n\nโหมด Local ต้องดาวน์โหลดโมเดลก่อน ขนาด 1 GB (ครั้งเดียว) \
-                 ระหว่างดาวน์โหลดดูความคืบหน้าได้ในเมนู 🎙\n\nหรือเลือก Serverless ในเมนูเพื่อถอดเสียงบนเซิร์ฟเวอร์แทน\n\nดาวน์โหลดเลยไหม?",
+                 ระหว่างดาวน์โหลดดูความคืบหน้าได้ในเมนู 🎙\n\nหรือเลือก \"เซิร์ฟเวอร์ของทีม\" ในเมนู 🎙 › Settings… เพื่อถอดเสียงบนเซิร์ฟเวอร์แทน\n\nดาวน์โหลดเลยไหม?",
                 "ดาวน์โหลด",
                 "ไว้ทีหลัง",
             );
@@ -760,9 +783,12 @@ impl App {
                     );
                 }
                 if !out.text.is_empty() {
-                    let text = corrections::space_thai_latin(&self.corrections.apply(&out.text));
+                    let text = corrections::finish(&out.text, &self.corrections, self.cfg.numbers_as_digits);
                     eprintln!("{:.1}s in {} segment(s): {}", out.audio_s, out.segments, said(&text));
                     self.last_text = text.clone();
+                    self.recent.push_front(text.clone());
+                    self.recent.truncate(RECENT);
+                    self.recent_dirty = true;
                     let phase = self.paste(text);
                     self.overlay.set(phase);
                 } else if !out.errors.is_empty() {
@@ -822,6 +848,12 @@ impl App {
             UserEvent::UninstallAnswer(answer) => {
                 self.dialog_open = false;
                 let Some(delete_model) = answer else { return };
+                // Close Settings first: on Windows its WebView2 holds files in the data folder
+                // that the uninstall deletes. The window itself goes when the app quits.
+                if let Some(w) = self.settings.take() {
+                    drop(w);
+                    std::thread::sleep(Duration::from_millis(500)); // WebView2 lets go of its files
+                }
                 match update::uninstall(delete_model) {
                     Ok(()) => {
                         // macOS: uninstall.sh finishes once this app has quit. Windows: done.
@@ -886,6 +918,7 @@ impl App {
                 }
             }
             UserEvent::Menu(_) => {}
+            UserEvent::Settings(msg) => self.settings_message(&msg),
         }
     }
 
@@ -915,17 +948,22 @@ impl App {
     }
 
     /// Two prompts: the word as it came out, then as it should be; appended to the corrections.
-    fn ask_correction(&mut self) {
+    /// `transcript` (e.g. the last one) fills the first prompt, to cut down to the wrong word:
+    /// its spelling has to match exactly, and copying it is easier than typing it.
+    fn ask_correction(&mut self, transcript: &str) {
         if self.dialog_open {
             return;
         }
         self.dialog_open = true;
         let p = self.proxy.clone();
+        let transcript = transcript.to_string();
         std::thread::spawn(move || {
-            let answer = platform::ask_text(
-                "แก้คำ (1/2): คำที่ PoodPim พิมพ์ออกมาผิด\nเช่น ฟีดแบ็ก หรือ depop\n(ได้ยินผิดหลายแบบ คั่นด้วยจุลภาค ,)",
-                "",
-            )
+            let prompt = if transcript.is_empty() {
+                "แก้คำ (1/2): คำที่ PoodPim พิมพ์ออกมาผิด\nเช่น ฟีดแบ็ก หรือ depop\n(ได้ยินผิดหลายแบบ คั่นด้วยจุลภาค ,)"
+            } else {
+                "แก้คำ (1/2): ลบข้อความให้เหลือแค่คำที่ PoodPim พิมพ์ผิด\nเช่น ฟีดแบ็ก หรือ depop\n(ได้ยินผิดหลายแบบ คั่นด้วยจุลภาค ,)"
+            };
+            let answer = platform::ask_text(prompt, &transcript)
             .and_then(|heard| {
                 let wanted = platform::ask_text(&format!("แก้คำ (2/2): ให้เขียน \"{heard}\" เป็นอะไร\nเช่น feedback หรือ DevOps"), "")?;
                 Some((heard, wanted))
@@ -940,6 +978,7 @@ impl App {
         let modified = std::fs::metadata(hotwords::user_file()).and_then(|m| m.modified()).ok();
         if modified.is_none() || modified != self.vocabulary_modified {
             let (text, modified) = hotwords::read_user_list();
+            self.vocab_count = text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).count();
             self.vocabulary = Arc::new(Hotwords::new(&text));
             self.vocabulary_header = Arc::new(hotwords::to_header(&text));
             self.vocabulary_modified = modified;
@@ -947,6 +986,7 @@ impl App {
         let modified = std::fs::metadata(corrections::user_file()).and_then(|m| m.modified()).ok();
         if modified.is_none() || modified != self.corrections_modified {
             let (text, modified) = corrections::read_user_list();
+            self.corrections_count = text.lines().map(str::trim).filter(|l| !l.starts_with('#') && l.contains('=')).count();
             self.corrections = Corrections::new(&text);
             self.corrections_modified = modified;
         }
@@ -1282,6 +1322,210 @@ impl App {
         Phase::Done
     }
 
+    fn open_settings(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+        if let Some(w) = &self.settings {
+            w.focus();
+            return;
+        }
+        // A menu-bar app has no Dock icon or menu bar; while Settings is open it gets both, so
+        // the window comes to the front and ⌘C / ⌘V work in its fields.
+        #[cfg(target_os = "macos")]
+        {
+            use tao::platform::macos::{ActivationPolicy, EventLoopWindowTargetExtMacOS};
+            target.set_activation_policy_at_runtime(ActivationPolicy::Regular);
+            self.edit_menu.get_or_insert_with(edit_menu).init_for_nsapp();
+        }
+        #[cfg(windows)]
+        if let Some(e) = crate::settings::webview_missing() {
+            eprintln!("settings window: WebView2 runtime missing: {e}");
+            std::thread::spawn(|| {
+                if platform::confirm(
+                    "หน้าตั้งค่าต้องใช้ Microsoft Edge WebView2 Runtime ซึ่งเครื่องนี้ยังไม่มี\n\n\
+                     (มีมากับ Windows 11 และ Windows 10 ที่อัปเดตแล้ว) ติดตั้งฟรีจาก Microsoft\n\nเปิดหน้าดาวน์โหลดไหม?",
+                    "เปิดหน้าดาวน์โหลด",
+                    "ไว้ทีหลัง",
+                ) {
+                    platform::open_url("https://developer.microsoft.com/microsoft-edge/webview2/");
+                }
+            });
+            return;
+        }
+        let p = self.proxy.clone();
+        match crate::settings::SettingsWindow::open(target, move |m| {
+            let _ = p.send_event(UserEvent::Settings(m));
+        }) {
+            Ok(w) => self.settings = Some(w),
+            Err(e) => {
+                eprintln!("settings window: {e:#}");
+                show_alert(format!("เปิดหน้าตั้งค่าไม่ได้: {e:#}"));
+            }
+        }
+    }
+
+    fn close_settings(&mut self, target: &EventLoopWindowTarget<UserEvent>) {
+        self.settings = None;
+        #[cfg(target_os = "macos")]
+        {
+            use tao::platform::macos::{ActivationPolicy, EventLoopWindowTargetExtMacOS};
+            target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
+        }
+        let _ = target;
+    }
+
+    /// What the Settings page shows (JSON for its render()).
+    fn settings_state(&self) -> String {
+        serde_json::json!({
+            "version": update::CURRENT,
+            "status": if self.needs_permission { "ต้องให้สิทธิ์ Accessibility ก่อน" } else { self.status_text.as_str() },
+            "backend": if self.cfg.backend == Backend::Lambda { "lambda" } else { "local" },
+            "serverUrl": self.cfg.server_url,
+            "hasKey": !self.cfg.api_key.is_empty(),
+            "mixed": self.cfg.mixed_english,
+            "digits": self.cfg.numbers_as_digits,
+            "restore": self.cfg.restore_clipboard,
+            "unload": self.cfg.unload_when_idle,
+            "autostart": self.cfg.start_at_login,
+            "vocabCount": self.vocab_count,
+            "correctionsCount": self.corrections_count,
+            "talkKey": TALK_KEY_LABEL,
+            "needsModel": self.cfg.backend == Backend::Local && self.state == State::NeedsModel,
+            "needsPermission": self.needs_permission,
+            "updates": update::supported(),
+        })
+        .to_string()
+    }
+
+    fn show_settings_state(&mut self) {
+        if self.settings.is_some() {
+            let state = self.settings_state();
+            if let Some(w) = &mut self.settings {
+                w.show_state(&state);
+            }
+        }
+    }
+
+    fn settings_toast(&self, text: &str) {
+        if let Some(w) = &self.settings {
+            w.toast(text);
+        }
+    }
+
+    /// A message from the Settings page.
+    fn settings_message(&mut self, msg: &str) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(msg) else { return };
+        let text = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        eprintln!("settings: {} {}", v["cmd"].as_str().unwrap_or("?"), v["key"].as_str().unwrap_or(""));
+        match v["cmd"].as_str().unwrap_or("") {
+            "ready" => {
+                self.reload_vocabulary();
+                if let Some(w) = &mut self.settings {
+                    w.forget_state();
+                }
+            }
+            "close" => self.settings_close = true,
+            "set" => {
+                let on = v["value"].as_bool().unwrap_or(false);
+                match v["key"].as_str().unwrap_or("") {
+                    "mixed" => self.cfg.mixed_english = on,
+                    "digits" => self.cfg.numbers_as_digits = on,
+                    "restore" => self.cfg.restore_clipboard = on,
+                    "unload" => {
+                        self.cfg.unload_when_idle = on;
+                        self.last_used = Instant::now();
+                    }
+                    "autostart" => self.cfg.start_at_login = on,
+                    _ => return,
+                }
+                self.cfg.save();
+                if v["key"] == "autostart" {
+                    self.apply_autostart();
+                }
+            }
+            "backend" => {
+                let backend = if text("value") == "lambda" { Backend::Lambda } else { Backend::Local };
+                if backend != self.cfg.backend {
+                    if self.busy() {
+                        self.settings_toast("รอให้ถอดเสียงเสร็จก่อน");
+                    }
+                    self.switch_backend(backend);
+                }
+            }
+            "server" => {
+                let url = text("url");
+                let key = match text("key") {
+                    k if k.is_empty() => self.cfg.api_key.clone(),
+                    k => k,
+                };
+                if !url.starts_with("https://") || key.is_empty() {
+                    return;
+                }
+                self.cfg.server_url = url;
+                self.cfg.api_key = key;
+                self.cfg.backend = Backend::Lambda;
+                self.cfg.save();
+                self.last_server_ok = None;
+                self.key_rejected = false;
+                if !self.busy() {
+                    self.start_backend();
+                }
+                self.settings_toast("บันทึกแล้ว");
+            }
+            "open" => match text("what").as_str() {
+                "vocabulary" => {
+                    self.reload_vocabulary();
+                    platform::open_in_editor(&hotwords::user_file());
+                }
+                "corrections" => {
+                    self.reload_vocabulary();
+                    platform::open_in_editor(&corrections::user_file());
+                }
+                "logs" => {
+                    if let Some(dir) = platform::log_dir() {
+                        platform::open_folder(&dir);
+                    }
+                }
+                "accessibility" => platform::open_permission_settings(),
+                _ => {}
+            },
+            "correction" => {
+                let (heard, wanted) = (text("heard"), text("wanted"));
+                if heard.is_empty() || wanted.is_empty() {
+                    return;
+                }
+                match corrections::add_to_user_file(&heard, &wanted) {
+                    Ok(()) => {
+                        self.reload_vocabulary();
+                        self.settings_toast(&format!("เพิ่มแล้ว: {heard} → {wanted}"));
+                    }
+                    Err(e) => self.settings_toast(&format!("บันทึกไม่ได้: {e}")),
+                }
+            }
+            "download" => self.start_download(),
+            "update" => self.check_update(),
+            "uninstall" => self.ask_uninstall(),
+            _ => {}
+        }
+    }
+
+    /// Fills menu › Recent: one submenu per transcript, with Paste and Fix a word….
+    fn rebuild_recent(&mut self, menu: &Submenu) {
+        for entry in self.recent_entries.drain(..) {
+            let _ = menu.remove(&entry);
+        }
+        self.recent_ids.clear();
+        for text in &self.recent {
+            let label: String = if text.chars().count() > 40 { text.chars().take(40).chain("…".chars()).collect() } else { text.clone() };
+            let entry = Submenu::new(label.replace('&', "&&"), true);
+            let paste = MenuItem::new("Paste", true, None);
+            let fix = MenuItem::new("Fix a word…", true, None);
+            let _ = entry.append_items(&[&paste, &fix]);
+            let _ = menu.append(&entry);
+            self.recent_ids.push((paste.id().clone(), fix.id().clone()));
+            self.recent_entries.push(entry);
+        }
+        menu.set_enabled(!self.recent.is_empty());
+    }
+
     fn refresh(&mut self, ui: &Ui) {
         self.offer_pending_update();
         if self.warm.as_ref().is_some_and(|w| w.is_finished()) && self.state != State::Recording {
@@ -1292,21 +1536,54 @@ impl App {
         } else {
             ui.status.set_text(&self.status_text);
         }
-        ui.permission.set_enabled(self.needs_permission);
-        ui.local.set_checked(self.cfg.backend == Backend::Local);
-        ui.lambda.set_checked(self.cfg.backend == Backend::Lambda);
+        let need_download = self.cfg.backend == Backend::Local
+            && matches!(self.state, State::NeedsModel | State::Error)
+            && !model::is_ready(&model::model_dir());
+        // Menu: status, [permission], separator, Paste last, Recent, Add correction, separator,
+        // Settings, [download], …
+        if self.needs_permission != ui.shown_permission.get() {
+            ui.shown_permission.set(self.needs_permission);
+            let _ = if self.needs_permission { ui.menu.insert(&ui.permission, 1) } else { ui.menu.remove(&ui.permission) };
+        }
+        if need_download != ui.shown_download.get() {
+            ui.shown_download.set(need_download);
+            let at = 7 + usize::from(ui.shown_permission.get());
+            let _ = if need_download { ui.menu.insert(&ui.download, at) } else { ui.menu.remove(&ui.download) };
+        }
         ui.paste_last.set_enabled(!self.last_text.is_empty());
-        ui.download.set_enabled(
-            self.cfg.backend == Backend::Local
-                && matches!(self.state, State::NeedsModel | State::Error)
-                && !model::is_ready(&model::model_dir()),
-        );
+        if self.recent_dirty {
+            self.recent_dirty = false;
+            self.rebuild_recent(&ui.recent);
+        }
         let (icon, template) = icon_for(self.state);
         #[cfg(target_os = "macos")]
         let _ = if template { ui.tray.set_icon_templated(Some(icon)) } else { ui.tray.set_icon(Some(icon)) };
         #[cfg(not(target_os = "macos"))]
         let _ = (template, ui.tray.set_icon(Some(icon)));
     }
+}
+
+/// macOS app menu while Settings is open: Edit gives the text fields ⌘X / ⌘C / ⌘V / ⌘A / ⌘Z.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn edit_menu() -> Menu {
+    let menu = Menu::new();
+    let app = Submenu::with_items("PoodPim", true, &[&PredefinedMenuItem::close_window(Some("Close Settings"))]).expect("menu");
+    let edit = Submenu::with_items(
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(None),
+            &PredefinedMenuItem::redo(None),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::cut(None),
+            &PredefinedMenuItem::copy(None),
+            &PredefinedMenuItem::paste(None),
+            &PredefinedMenuItem::select_all(None),
+        ],
+    )
+    .expect("menu");
+    let _ = menu.append_items(&[&app, &edit]);
+    menu
 }
 
 /// A message box that doesn't block the event loop.
