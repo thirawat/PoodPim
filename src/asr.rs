@@ -92,6 +92,24 @@ fn starts_thai_word(c: char) -> bool {
     ('\u{0E01}'..='\u{0E30}').contains(&c) && c != '\u{0E30}' || ('\u{0E40}'..='\u{0E44}').contains(&c)
 }
 
+/// One decoder step on silence, to check that the decoder runs on this machine.
+fn decoder_step(decoder: &mut Session) -> Result<()> {
+    let frame = vec![0.0f32; ENC_DIM];
+    let state = vec![0.0f32; STATE_LEN];
+    let res = decoder.run(ort::inputs![
+        "encoder_outputs" => TensorRef::from_array_view(([1usize, ENC_DIM, 1], &frame[..]))?,
+        "targets" => TensorRef::from_array_view(([1usize, 1], &[0i32][..]))?,
+        "target_length" => TensorRef::from_array_view(([1usize], &[1i32][..]))?,
+        "input_states_1" => TensorRef::from_array_view(([2usize, 1, 640], &state[..]))?,
+        "input_states_2" => TensorRef::from_array_view(([2usize, 1, 640], &state[..]))?,
+    ])?;
+    let (_, scores) = res["outputs"].try_extract_tensor::<f32>()?;
+    if scores.is_empty() || scores.iter().any(|v| !v.is_finite()) {
+        return Err(anyhow!("decoder gave no scores or non-finite ones"));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct Hyp {
     tokens: Vec<usize>,
@@ -177,7 +195,20 @@ impl OpenThaiAsr {
         let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         eprintln!("loading {} + {} ({threads}/{dec_threads} threads)", name(&enc_path), name(&dec_path));
         let encoder = build(enc_path, threads)?;
-        let decoder = build(dec_path, dec_threads)?;
+        let fp32 = dir.join("decoder_joint.onnx");
+        let decoder = if dec_path == fp32 {
+            build(dec_path, dec_threads)?
+        } else {
+            // The int8 decoder was only measured on Apple silicon: if this machine's ONNX
+            // Runtime can't load or run it, carry on with the fp32 one.
+            match build(dec_path, dec_threads).and_then(|mut d| decoder_step(&mut d).map(|()| d)) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("int8 decoder failed ({e:#}): using {}", name(&fp32));
+                    build(fp32, dec_threads)?
+                }
+            }
+        };
         let tokens: Vec<String> = std::fs::read_to_string(dir.join("tokens.txt"))
             .context("reading tokens.txt")?
             .lines()
