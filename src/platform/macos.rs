@@ -20,8 +20,28 @@ const KEY_ESC: i64 = 53;
 const KEY_V: u16 = 9;
 const NX_DEVICERALTKEYMASK: u64 = 0x40; // device-dependent bit: right Option is down
 
-/// Listens on a background thread with a listen-only CGEventTap. Needs Accessibility
-/// (or Input Monitoring); until granted it reports PermissionMissing and retries.
+/// The Esc tap (see `spawn_hotkey_listener`), as a raw CFMachPortRef; 0 until it exists.
+static ESC_TAP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+unsafe extern "C" {
+    fn CGEventTapEnable(tap: *const std::ffi::c_void, enable: bool);
+}
+
+/// Turns the Esc tap on while dictation listens and off otherwise (see `super::set_listening`).
+pub(super) fn capture_escape(on: bool) {
+    let tap = ESC_TAP.load(Ordering::SeqCst);
+    if tap != 0 {
+        unsafe { CGEventTapEnable(tap as *const std::ffi::c_void, on) };
+    }
+}
+
+/// Listens on a background thread. Needs Accessibility (or Input Monitoring); until granted it
+/// reports PermissionMissing and retries. Two event taps:
+/// - a listen-only one for Right Option, always on;
+/// - one that can drop events, for Esc only and switched on only while dictation listens, so
+///   that Esc cancels dictation without also reaching the focused app. Kept apart because a tap
+///   that can drop events stands in the way of every key press while it is on. If it can't be
+///   made, the listen-only tap reports Esc as before (and the app sees it too).
 pub fn spawn_hotkey_listener(sink: HotkeySink) {
     let sink: Arc<HotkeySink> = Arc::new(sink);
     std::thread::Builder::new()
@@ -38,6 +58,31 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                     std::thread::sleep(Duration::from_secs(1));
                     continue;
                 }
+                let esc_disabled = Arc::new(AtomicBool::new(false));
+                let (s, d) = (sink.clone(), esc_disabled.clone());
+                let esc_tap = CGEventTap::new(
+                    CGEventTapLocation::Session,
+                    CGEventTapPlacement::HeadInsertEventTap,
+                    CGEventTapOptions::Default,
+                    vec![CGEventType::KeyDown],
+                    move |_proxy, etype, event| match etype {
+                        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
+                            d.store(true, Ordering::SeqCst);
+                            CallbackResult::Keep
+                        }
+                        CGEventType::KeyDown
+                            if event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) == KEY_ESC
+                                && super::listening() =>
+                        {
+                            s(HotkeyEvent::Escape);
+                            CallbackResult::Drop // cancels dictation only
+                        }
+                        _ => CallbackResult::Keep,
+                    },
+                )
+                .inspect_err(|_| eprintln!("no Esc tap: Esc reaches the focused app too"))
+                .ok();
+                let has_esc_tap = esc_tap.is_some();
                 let disabled = Arc::new(AtomicBool::new(false));
                 let (s, d) = (sink.clone(), disabled.clone());
                 let tap = CGEventTap::new(
@@ -56,10 +101,12 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                                     s(if down { HotkeyEvent::TalkDown } else { HotkeyEvent::TalkUp });
                                 }
                             }
-                            CGEventType::KeyDown => {
-                                if event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) == KEY_ESC {
-                                    s(HotkeyEvent::Escape);
-                                }
+                            CGEventType::KeyDown
+                                if !has_esc_tap
+                                    && event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) == KEY_ESC
+                                    && super::listening() =>
+                            {
+                                s(HotkeyEvent::Escape)
                             }
                             _ => {}
                         }
@@ -77,11 +124,21 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                 let source = tap.mach_port().create_runloop_source(0).expect("runloop source");
                 CFRunLoop::get_current().add_source(&source, unsafe { kCFRunLoopCommonModes });
                 tap.enable();
+                if let Some(esc) = &esc_tap {
+                    let source = esc.mach_port().create_runloop_source(0).expect("runloop source");
+                    CFRunLoop::get_current().add_source(&source, unsafe { kCFRunLoopCommonModes });
+                    // Off until dictation listens (the tap and this thread live as long as the app).
+                    ESC_TAP.store(esc.mach_port().as_concrete_TypeRef() as usize, Ordering::SeqCst);
+                    capture_escape(super::listening());
+                }
                 sink(HotkeyEvent::Ready);
                 loop {
                     CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, Duration::from_secs(1), false);
                     if disabled.swap(false, Ordering::SeqCst) {
                         tap.enable();
+                    }
+                    if esc_disabled.swap(false, Ordering::SeqCst) {
+                        capture_escape(super::listening());
                     }
                 }
             }
@@ -117,6 +174,18 @@ pub fn accessibility_trusted(prompt: bool) -> bool {
 /// being typed. Call it on the main thread (NSWorkspace updates it there).
 pub fn focused_window() -> u64 {
     objc2_app_kit::NSWorkspace::sharedWorkspace().frontmostApplication().map_or(0, |a| a.processIdentifier() as u64)
+}
+
+unsafe extern "C" {
+    fn CGEventSourceFlagsState(state: i32) -> u64;
+}
+
+/// Whether Right Option is down now, asked of the keyboard itself rather than told by the
+/// event tap: the tap can miss the release (Secure Input in a password field, the screen
+/// locking), which left dictation recording until the key was pressed again.
+pub fn talk_key_down() -> Option<bool> {
+    const HID_SYSTEM_STATE: i32 = 1;
+    Some(unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) } & NX_DEVICERALTKEYMASK != 0)
 }
 
 /// Windows only (an app run as administrator ignores PoodPim's ⌘V there); never on macOS.

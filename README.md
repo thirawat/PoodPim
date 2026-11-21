@@ -47,7 +47,8 @@ irm https://raw.githubusercontent.com/thirawat/PoodPim/main/install.ps1 | iex
 
 The installer downloads the latest release, checks its SHA-256 (and on macOS that the app
 carries the PoodPim signature), installs it (`/Applications`, or
-`%LOCALAPPDATA%\Programs\PoodPim` with a Start menu shortcut) and opens it; the app then
+`%LOCALAPPDATA%\Programs\PoodPim` with a Start menu shortcut; on Windows it also installs the
+Microsoft Visual C++ Runtime if the PC lacks it, after Windows asks for permission) and opens it; the app then
 offers to download the speech model (1 GB). Run it again to update. A release candidate:
 put `POODPIM_VERSION=v1.0.1-rc.1` in front of `sh` (macOS) or set `$env:POODPIM_VERSION`
 first (Windows).
@@ -68,10 +69,14 @@ on Windows also Settings › Apps › PoodPim.
 |---|---|---|
 | Talk | hold **Right ⌥** | hold **Right Alt** |
 | Hands-free, typed as you speak | tap Right ⌥, tap again to finish | tap Right Alt, tap again |
-| Cancel | Esc | Esc |
+| Cancel | Esc (not passed on to the app you're in) | Esc |
 | Paste | ⌘V (clipboard restored after) | Ctrl+V (clipboard restored after) |
 
 The menu-bar / tray icon shows the state (mic = ready, red = listening, amber = transcribing).
+If the microphone stops sending sound mid-recording (unplugged, a Bluetooth headset dropping:
+nothing for 2 s, or 5 s from the start), the recording ends, what was heard is typed, and the
+pill says so. If the talk key's release never arrives (macOS Secure Input, e.g. in a password
+field), the app notices the key is up after a second and finishes as if it had been let go.
 Its menu keeps the everyday actions: paste last transcript, **Recent** (the last 10
 transcripts, kept in memory only, each with Paste and "Fix a word…", which opens "Add
 correction…" filled with that transcript), Add correction…, and **Settings…**. "Open
@@ -250,7 +255,9 @@ Windows: `package-windows.sh` cross-compiles from macOS with
 [cargo-xwin](https://github.com/rust-cross/cargo-xwin) (`cargo install --locked cargo-xwin`;
 MSVC/SDK libraries are cached in `target/xwin-cache`), or build on Windows with the MSVC
 toolchain (`cargo build --release`). The zip ships `DirectML.dll` next to the exe (the prebuilt
-ONNX Runtime for Windows always links it) and needs the Visual C++ runtime on the PC.
+ONNX Runtime for Windows always links it) and needs the Visual C++ runtime on the PC
+(install.ps1 installs it when `msvcp140.dll`, `vcruntime140.dll` or `vcruntime140_1.dll` is
+missing from System32, from Microsoft's `vc_redist.x64.exe` after checking its signature).
 
 On Windows, PoodPim takes Right Alt for itself: other apps never see it, because an Alt
 pressed and released on its own opens the focused app's menu (Office KeyTips). Left Alt is

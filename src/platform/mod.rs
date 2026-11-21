@@ -20,6 +20,22 @@ pub const KEY_KEEP_PROMPT: &str = "ใส่ API key\n(เว้นว่าง�
 
 pub type HotkeySink = Box<dyn Fn(HotkeyEvent) + Send + Sync + 'static>;
 
+/// Whether dictation is listening. Only then does Esc cancel it, and the keyboard hook keeps
+/// that Esc from the focused app (where it would close a dialog or stop a program running in
+/// a terminal, as users of other dictation apps reported).
+static LISTENING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_listening(on: bool) {
+    LISTENING.store(on, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(target_os = "macos")]
+    macos::capture_escape(on);
+}
+
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+fn listening() -> bool {
+    LISTENING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]

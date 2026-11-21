@@ -46,6 +46,10 @@ const TAIL: Duration = Duration::from_millis(200);
 const UNLOAD_AFTER: Duration = Duration::from_secs(15 * 60);
 /// Overlay animation frame interval.
 const FRAME: Duration = Duration::from_millis(33);
+/// The microphone has sent nothing for this long since the recording started (Bluetooth
+/// headsets can take a second or two to switch over) or since its last sound: it is gone.
+const MIC_FIRST: Duration = Duration::from_secs(5);
+const MIC_GAP: Duration = Duration::from_secs(2);
 /// How often the unfinished part is transcribed again for the pill (`live_preview`).
 const PREVIEW_EVERY: Duration = Duration::from_millis(700);
 /// The preview transcribes at most this much of the end of the unfinished part: the pill shows
@@ -180,6 +184,14 @@ struct App {
     preview: (usize, String, bool),
     preview_at: Instant,
     preview_busy: Arc<std::sync::atomic::AtomicBool>,
+    /// The microphone watchdog: samples recorded at the last check, when that number last
+    /// grew, and whether the recording was ended because the microphone stopped.
+    mic_len: usize,
+    mic_seen: Instant,
+    mic_lost: bool,
+    /// Checks in a row (POLL apart) that found the talk key up while the app thought it held
+    /// (`check_talk_key`).
+    key_up_seen: u32,
     typer: Option<(inserter::LiveTyper, u64)>,
     last_server_ok: Option<Instant>,
     dialog_open: bool,
@@ -321,6 +333,10 @@ pub fn run() -> Result<()> {
         preview: (0, String::new(), false),
         preview_at: Instant::now(),
         preview_busy: Default::default(),
+        mic_len: 0,
+        mic_seen: Instant::now(),
+        mic_lost: false,
+        key_up_seen: 0,
         typer: None,
         last_server_ok: None,
         dialog_open: false,
@@ -848,12 +864,15 @@ impl App {
                         }
                         None => self.paste(rest),
                     };
-                    self.overlay.set(phase);
+                    self.overlay.set(if phase == Phase::Done && self.mic_lost { Phase::MicLost } else { phase });
                 } else if !out.errors.is_empty() {
                     self.overlay.set(Phase::Failed);
                 } else {
                     eprintln!("no speech in {:.1}s of audio", out.audio_s);
-                    self.overlay.set(Phase::NoSpeech);
+                    self.overlay.set(if self.mic_lost { Phase::MicLost } else { Phase::NoSpeech });
+                }
+                if self.mic_lost {
+                    self.status_text = "The microphone stopped sending sound: check it, or pick another one in the system settings".into();
                 }
             }
             UserEvent::UpdateFound(tag) => {
@@ -1204,6 +1223,8 @@ impl App {
                             self.pressed_at = at;
                             eprintln!("microphone started in {} ms", started.elapsed().as_millis());
                             self.state = State::Recording;
+                            platform::set_listening(true);
+                            (self.mic_len, self.mic_seen, self.mic_lost, self.key_up_seen) = (0, Instant::now(), false, 0);
                             self.status_text = "Listening…".into();
                             eprintln!("listening");
                             self.overlay.set(Phase::Listening { handsfree: false });
@@ -1237,6 +1258,7 @@ impl App {
             }
             HotkeyEvent::Escape => {
                 if self.state == State::Recording {
+                    platform::set_listening(false);
                     self.stop_at = None;
                     self.recorder.stop_raw();
                     self.segmenter = None;
@@ -1350,6 +1372,40 @@ impl App {
         }
     }
 
+    /// Whether the microphone has stopped: its stream reported an error, or no sound has come
+    /// for MIC_FIRST since the start / MIC_GAP since the last. `len`: samples recorded so far.
+    fn mic_stopped(&mut self, len: usize) -> bool {
+        if len > self.mic_len {
+            (self.mic_len, self.mic_seen) = (len, Instant::now());
+        }
+        let quiet_for = if self.mic_len == 0 { MIC_FIRST } else { MIC_GAP };
+        let why = match self.recorder.error() {
+            Some(e) => e,
+            None if self.mic_seen.elapsed() >= quiet_for => format!("no sound for {} s", quiet_for.as_secs()),
+            None => return false,
+        };
+        eprintln!("microphone stopped ({why}): finishing with what was heard");
+        true
+    }
+
+    /// Hold to talk: if the talk key is up although its release never came (the event tap
+    /// misses it under Secure Input, e.g. in a password field), let go of it now.
+    fn check_talk_key(&mut self) {
+        let holding = self.state == State::Recording && !self.handsfree && self.stop_at.is_none();
+        if !holding || self.pressed_at.elapsed() < Duration::from_millis(600) || platform::talk_key_down() != Some(false) {
+            self.key_up_seen = 0;
+            return;
+        }
+        // A full second of "up" before acting: cutting off someone who is still holding the key
+        // would be worse than recording a little longer.
+        self.key_up_seen += 1;
+        if self.key_up_seen >= 10 {
+            eprintln!("the talk key is up but its release was missed: finishing");
+            self.key_up_seen = 0;
+            self.on_hotkey(HotkeyEvent::TalkUp, Instant::now());
+        }
+    }
+
     /// `live_preview`: the pill shows the parts heard so far and the unfinished one as heard
     /// up to now (its end, which is what changes).
     fn show_heard(&mut self) {
@@ -1455,6 +1511,13 @@ impl App {
             self.status_text = format!("Listening… {done}/{sent} parts transcribed{hint}");
         }
         self.show_heard(); // a part may have finished since (unchanged text costs nothing)
+        if self.mic_stopped(len) {
+            self.mic_lost = true;
+            self.handsfree = false;
+            self.finish();
+            return;
+        }
+        self.check_talk_key();
         if len as f64 / rate as f64 > MAX_RECORDING.as_secs_f64() {
             eprintln!("recording reached {} min: finishing", MAX_RECORDING.as_secs() / 60);
             self.handsfree = false;
@@ -1465,6 +1528,7 @@ impl App {
     }
 
     fn finish(&mut self) {
+        platform::set_listening(false);
         self.stop_at = None;
         let raw = self.recorder.stop_raw();
         let rate = self.recorder.rate();

@@ -69,8 +69,16 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
             if kb.vkCode == VK_LCONTROL.0 as u32 && kb.scanCode == ALTGR_FAKE_CTRL_SCAN {
                 return LRESULT(1);
             }
-            if kb.vkCode == VK_ESCAPE.0 as u32 && is_down {
-                sink(HotkeyEvent::Escape);
+            if kb.vkCode == VK_ESCAPE.0 as u32 {
+                // While listening, Esc cancels dictation and no app sees it (its release too).
+                if is_down && super::listening() {
+                    ESC_TAKEN.store(true, Ordering::SeqCst);
+                    sink(HotkeyEvent::Escape);
+                    return LRESULT(1);
+                }
+                if is_up && ESC_TAKEN.swap(false, Ordering::SeqCst) {
+                    return LRESULT(1);
+                }
             }
         }
     }
@@ -96,6 +104,15 @@ fn send_keys(keys: &[(VIRTUAL_KEY, bool)]) {
     unsafe {
         SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
     }
+}
+
+/// Esc was taken out by the hook (see `listening`): its release goes too.
+static ESC_TAKEN: AtomicBool = AtomicBool::new(false);
+
+/// The hook swallows Right Alt, so Windows' own key state doesn't know it is down: there is
+/// nothing to check against (unlike macOS).
+pub fn talk_key_down() -> Option<bool> {
+    None
 }
 
 pub fn send_paste() {

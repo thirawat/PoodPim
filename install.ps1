@@ -108,6 +108,32 @@ try {
     foreach ($k in 'NoModify', 'NoRepair') { Set-ItemProperty -Path $Key -Name $k -Value 1 -Type DWord }
     Set-ItemProperty -Path $Key -Name EstimatedSize -Value $SizeKb -Type DWord
 
+    # PoodPim.exe needs the Visual C++ Runtime (msvcp140.dll...), present on most PCs; without it
+    # Windows only says "MSVCP140.dll was not found". Installing it needs administrator rights
+    # (Windows asks); if the user says no, PoodPim is installed anyway and this says where to get it.
+    $VcUrl = 'https://aka.ms/vs/17/release/vc_redist.x64.exe'
+    $VcMissing = @('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll' |
+        Where-Object { -not (Test-Path (Join-Path $env:windir "System32\$_")) })
+    if ($VcMissing.Count -gt 0) {
+        Write-Host 'PoodPim needs the Microsoft Visual C++ Runtime, which this PC does not have yet.'
+        Write-Host 'Installing it now: click Yes when Windows asks for permission.'
+        try {
+            $Vc = Join-Path $Tmp 'vc_redist.x64.exe'
+            Invoke-WebRequest -UseBasicParsing -Uri $VcUrl -OutFile $Vc
+            $Sig = Get-AuthenticodeSignature $Vc
+            if ($Sig.Status -ne 'Valid' -or $Sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+                throw 'the download is not signed by Microsoft'
+            }
+            $P = Start-Process -FilePath $Vc -ArgumentList '/install', '/quiet', '/norestart' -Verb RunAs -Wait -PassThru
+            # 3010: installed, restart pending; 1638: a newer version is already there.
+            if (@(0, 3010, 1638) -notcontains $P.ExitCode) { throw "its installer exited with code $($P.ExitCode)" }
+        }
+        catch {
+            Write-Host "Could not install the Visual C++ Runtime ($($_.Exception.Message))." -ForegroundColor Yellow
+            Write-Host "Install it from $VcUrl, then open PoodPim from the Start menu." -ForegroundColor Yellow
+        }
+    }
+
     Start-Process -FilePath $Exe -WorkingDirectory $Dir
     Write-Host "PoodPim $Version is installed in $Dir"
     Write-Host 'Look for the microphone icon next to the clock, then hold Right Alt to talk.'
