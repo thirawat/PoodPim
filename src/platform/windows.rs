@@ -127,6 +127,11 @@ pub fn focused_window() -> u64 {
     unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize as u64 }
 }
 
+/// macOS only (Secure Input); Windows has no system-wide equivalent.
+pub fn secure_input() -> bool {
+    false
+}
+
 /// Whether the focused window belongs to an app run as administrator. Windows silently drops
 /// keystrokes sent to it from a normal app, so Ctrl+V from PoodPim would do nothing.
 pub fn foreground_is_elevated() -> bool {

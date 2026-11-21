@@ -212,6 +212,18 @@ pub fn talk_key_down() -> Option<bool> {
     Some(unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) } & NX_DEVICERALTKEYMASK != 0)
 }
 
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    fn IsSecureEventInputEnabled() -> bool;
+}
+
+/// Whether Secure Input is on: a password field (or an app such as a password manager, or
+/// Terminal's Secure Keyboard Entry) keeps typed keys private. It is system-wide, so it can
+/// also be on for an app that isn't the one dictated into.
+pub fn secure_input() -> bool {
+    unsafe { IsSecureEventInputEnabled() }
+}
+
 /// Windows only (an app run as administrator ignores PoodPim's ⌘V there); never on macOS.
 pub fn foreground_is_elevated() -> bool {
     false

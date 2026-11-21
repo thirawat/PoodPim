@@ -77,6 +77,8 @@ If the microphone stops sending sound mid-recording (unplugged, a Bluetooth head
 nothing for 2 s, or 5 s from the start), the recording ends, what was heard is typed, and the
 pill says so. If the talk key's release never arrives (macOS Secure Input, e.g. in a password
 field), the app notices the key is up after a second and finishes as if it had been let go.
+Dictating into a password field works, but while macOS Secure Input is on the pill doesn't
+show the words, and the text isn't kept for "Paste last transcript" or Recent.
 Its menu keeps the everyday actions: paste last transcript, **Recent** (the last 10
 transcripts, kept in memory only, each with Paste and "Fix a word…", which opens "Add
 correction…" filled with that transcript), Add correction…, and **Settings…**. "Open
@@ -256,8 +258,9 @@ Windows: `package-windows.sh` cross-compiles from macOS with
 MSVC/SDK libraries are cached in `target/xwin-cache`), or build on Windows with the MSVC
 toolchain (`cargo build --release`). The zip ships `DirectML.dll` next to the exe (the prebuilt
 ONNX Runtime for Windows always links it) and needs the Visual C++ runtime on the PC
-(install.ps1 installs it when `msvcp140.dll`, `vcruntime140.dll` or `vcruntime140_1.dll` is
-missing from System32, from Microsoft's `vc_redist.x64.exe` after checking its signature).
+(install.ps1 installs Microsoft's `vc_redist.x64.exe`, after checking its signature, unless the
+x64 runtime is registered or, on x64 Windows, `msvcp140.dll`, `vcruntime140.dll` and
+`vcruntime140_1.dll` are in System32; it doesn't start the app while the runtime is missing).
 
 On Windows, PoodPim takes Right Alt for itself: other apps never see it, because an Alt
 pressed and released on its own opens the focused app's menu (Office KeyTips). Left Alt is

@@ -195,6 +195,9 @@ struct App {
     /// The check found the talk key down during this hold: until then it doesn't act, as a key
     /// that macOS doesn't see as held (one sent by a remapping app or remote control) never is.
     key_down_seen: bool,
+    /// Secure Input was on at some point of this recording (a password field): its words are
+    /// not shown in the pill, and its text is not kept in Recent / "Paste last".
+    secure_seen: bool,
     typer: Option<(inserter::LiveTyper, u64)>,
     last_server_ok: Option<Instant>,
     dialog_open: bool,
@@ -341,6 +344,7 @@ pub fn run() -> Result<()> {
         mic_lost: false,
         key_up_seen: 0,
         key_down_seen: false,
+        secure_seen: false,
         typer: None,
         last_server_ok: None,
         dialog_open: false,
@@ -845,10 +849,16 @@ impl App {
                 let text = crate::pipeline::join_parts(&typed.iter().chain([&rest]).collect::<Vec<_>>());
                 if !text.is_empty() {
                     eprintln!("{:.1}s in {} segment(s), {} typed live: {}", out.audio_s, out.segments, typed.len(), said(&text));
-                    self.last_text = text.clone();
-                    self.recent.push_front(text.clone());
-                    self.recent.truncate(RECENT);
-                    self.recent_dirty = true;
+                    if self.secure_seen || platform::secure_input() {
+                        // Likely a password: pasted, but not kept for the menu.
+                        eprintln!("Secure Input is on: not kept in Recent");
+                        self.last_text.clear();
+                    } else {
+                        self.last_text = text.clone();
+                        self.recent.push_front(text.clone());
+                        self.recent.truncate(RECENT);
+                        self.recent_dirty = true;
+                    }
                     let phase = match typer {
                         Some(_) if rest.is_empty() => Phase::Done,
                         Some((typer, window)) if platform::focused_window() == window && !platform::foreground_is_elevated() => {
@@ -1231,6 +1241,7 @@ impl App {
                             self.state = State::Recording;
                             (self.mic_len, self.mic_seen, self.mic_lost) = (0, Instant::now(), false);
                             (self.key_up_seen, self.key_down_seen) = (0, false);
+                            self.secure_seen = platform::secure_input();
                             self.status_text = "Listening…".into();
                             eprintln!("listening");
                             self.overlay.set(Phase::Listening { handsfree: false });
@@ -1421,7 +1432,12 @@ impl App {
     /// `live_preview`: the pill shows the parts heard so far and the unfinished one as heard
     /// up to now (its end, which is what changes).
     fn show_heard(&mut self) {
+        self.secure_seen |= platform::secure_input();
         if !self.cfg.live_preview {
+            return;
+        }
+        if self.secure_seen {
+            self.overlay.set_preview(""); // likely a password: not on screen
             return;
         }
         // Shown until its part is transcribed (also once cut), so the words don't flicker.
