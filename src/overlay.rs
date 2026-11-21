@@ -65,10 +65,41 @@ impl Phase {
 
 pub struct Overlay {
     phase: Phase,
+    /// While listening: the end of what has been said so far, shown instead of the label.
+    preview: String,
     since: Instant,
     level: f32,
     shown: f32,
     view: Option<sys::View>,
+}
+
+/// How much of the text being said the pill shows (its end, which is what changes).
+const PREVIEW_CHARS: usize = 42;
+
+/// The last PREVIEW_CHARS characters of `text`, after "…" if cut; never starting on a Thai
+/// vowel sign or tone mark, which belong to the letter before them.
+fn preview_tail(text: &str) -> String {
+    let text = text.trim();
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= PREVIEW_CHARS {
+        return text.to_string();
+    }
+    let mut from = chars.len() - PREVIEW_CHARS;
+    while from < chars.len() && matches!(chars[from], '\u{0E31}' | '\u{0E34}'..='\u{0E3A}' | '\u{0E47}'..='\u{0E4E}') {
+        from += 1;
+    }
+    std::iter::once('…').chain(chars[from..].iter().copied()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn preview_shows_the_end_without_a_loose_mark() {
+        assert_eq!(super::preview_tail(" สวัสดีครับ "), "สวัสดีครับ");
+        // 44 chars: the cut falls on ่ (the 3rd), which must not start the tail.
+        let long = format!("ที่{}", "ก".repeat(41));
+        assert_eq!(super::preview_tail(&long), format!("…{}", "ก".repeat(41)));
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -88,6 +119,7 @@ impl Overlay {
     pub fn new() -> Self {
         Self {
             phase: Phase::Hidden,
+            preview: String::new(),
             since: Instant::now(),
             level: 0.0,
             shown: 0.0,
@@ -100,6 +132,7 @@ impl Overlay {
             return;
         }
         self.phase = phase;
+        self.preview.clear();
         self.since = Instant::now();
         if self.view.is_none() && self.phase != Phase::Hidden {
             self.view = sys::View::new();
@@ -120,6 +153,20 @@ impl Overlay {
             }
         }
         self.tick();
+    }
+
+    /// While listening, shows the end of `text` (what has been said so far, not yet typed)
+    /// in place of the label; empty brings the label back.
+    pub fn set_preview(&mut self, text: &str) {
+        let tail = preview_tail(text);
+        if !matches!(self.phase, Phase::Listening { .. }) || tail == self.preview {
+            return;
+        }
+        self.preview = tail;
+        if let Some(v) = &self.view {
+            let label = if self.preview.is_empty() { self.phase.label() } else { self.preview.clone() };
+            v.show(&label, self.phase.rgb());
+        }
     }
 
     /// Microphone level of the last ~50 ms (RMS of samples in -1..1).

@@ -46,6 +46,12 @@ const TAIL: Duration = Duration::from_millis(200);
 const UNLOAD_AFTER: Duration = Duration::from_secs(15 * 60);
 /// Overlay animation frame interval.
 const FRAME: Duration = Duration::from_millis(33);
+/// How often the unfinished part is transcribed again for the pill (`live_preview`).
+const PREVIEW_EVERY: Duration = Duration::from_millis(700);
+/// The preview transcribes at most this much of the end of the unfinished part: the pill shows
+/// ~42 characters (3-5 s of speech), and a whole 16 s part took 660 ms each time (M3), using
+/// the CPU all the time and making the last part wait after the key was let go.
+const PREVIEW_WINDOW: Duration = Duration::from_secs(6);
 /// Skip the wake-up call if the server answered this recently (Lambda keeps instances ~5–15 min).
 const ASSUME_WARM: Duration = Duration::from_secs(180);
 /// First update check after launch, then one a day.
@@ -65,6 +71,9 @@ enum UserEvent {
     Transcribed(u64, Outcome),
     /// One segment's text, as soon as it is transcribed (the recording may still go on).
     Part(u64, String),
+    /// What the unfinished part (the n-th of the recording, from 0) sounds like so far;
+    /// true if only its end was transcribed (PREVIEW_WINDOW).
+    Preview(u64, usize, String, bool),
     /// The int8 decoder was added to a model downloaded before it existed.
     DecoderInt8(Result<(), String>),
     Warmed(Result<u64, String>),
@@ -162,10 +171,15 @@ struct App {
     /// Bumped per recording so results of a cancelled one are ignored.
     rec_gen: u64,
     /// Typing while the user speaks (hands-free, `live_typing`): parts of this recording
-    /// transcribed so far, the parts typed (after corrections), and the typer with the window
+    /// transcribed so far (after corrections), the parts typed, and the typer with the window
     /// it types into. A part is typed only if every part before it was.
-    parts_heard: usize,
+    heard: Vec<String>,
     typed: Vec<String>,
+    /// `live_preview`: the unfinished part as heard so far (which part, from 0; text; only its
+    /// end), when the last preview was started, and whether one is running.
+    preview: (usize, String, bool),
+    preview_at: Instant,
+    preview_busy: Arc<std::sync::atomic::AtomicBool>,
     typer: Option<(inserter::LiveTyper, u64)>,
     last_server_ok: Option<Instant>,
     dialog_open: bool,
@@ -302,8 +316,11 @@ pub fn run() -> Result<()> {
         segmenter: None,
         pipeline: None,
         rec_gen: 0,
-        parts_heard: 0,
+        heard: Vec::new(),
         typed: Vec::new(),
+        preview: (0, String::new(), false),
+        preview_at: Instant::now(),
+        preview_busy: Default::default(),
         typer: None,
         last_server_ok: None,
         dialog_open: false,
@@ -959,6 +976,12 @@ impl App {
                 }
             }
             UserEvent::Part(generation, text) => self.type_part(generation, text),
+            UserEvent::Preview(generation, part, text, clipped) => {
+                if generation == self.rec_gen && self.state == State::Recording {
+                    self.preview = (part, corrections::finish(&text, &self.corrections, self.cfg.numbers_as_digits), clipped);
+                    self.show_heard();
+                }
+            }
             UserEvent::DecoderInt8(r) => match r {
                 Ok(()) => {
                     eprintln!("downloaded the int8 decoder: switching to it");
@@ -1299,9 +1322,11 @@ impl App {
         if generation != self.rec_gen {
             return; // cancelled recording
         }
-        self.parts_heard += 1;
+        let text = corrections::finish(&text, &self.corrections, self.cfg.numbers_as_digits);
+        self.heard.push(text.clone());
+        self.show_heard();
         let live = self.cfg.live_typing && self.handsfree && self.state == State::Recording;
-        if !live || self.typed.len() + 1 != self.parts_heard {
+        if !live || self.typed.len() + 1 != self.heard.len() {
             return; // left for the end, with every part after it (they must stay in order)
         }
         let window = platform::focused_window();
@@ -1309,7 +1334,6 @@ impl App {
             eprintln!("the focused window changed: the rest waits for the end");
             return;
         }
-        let text = corrections::finish(&text, &self.corrections, self.cfg.numbers_as_digits);
         let restore = self.cfg.restore_clipboard;
         let (typer, _) = self.typer.get_or_insert_with(|| (inserter::LiveTyper::start(restore), window));
         typer.type_text(continuation(&self.typed, &text));
@@ -1318,11 +1342,71 @@ impl App {
 
     /// Forgets this recording's live typing; the typer puts the clipboard back once done.
     fn end_live(&mut self) {
-        self.parts_heard = 0;
+        self.heard.clear();
+        self.preview = (0, String::new(), false);
         self.typed.clear();
         if let Some((typer, _)) = self.typer.take() {
             typer.finish();
         }
+    }
+
+    /// `live_preview`: the pill shows the parts heard so far and the unfinished one as heard
+    /// up to now (its end, which is what changes).
+    fn show_heard(&mut self) {
+        if !self.cfg.live_preview {
+            return;
+        }
+        // Shown until its part is transcribed (also once cut), so the words don't flicker.
+        let done = self.pipeline.as_ref().map_or(0, |p| p.progress().0);
+        let (part, text, clipped) = &self.preview;
+        let pending = if *part >= done.max(self.heard.len()) { text.as_str() } else { "" };
+        let shown = if *clipped && !pending.is_empty() {
+            format!("…{pending}") // the middle of the part wasn't transcribed: don't join across it
+        } else {
+            let all: Vec<&str> = self.heard.iter().map(String::as_str).chain([pending]).collect();
+            crate::pipeline::join_parts(&all)
+        };
+        self.overlay.set_preview(&shown);
+    }
+
+    /// `live_preview` with the local model: transcribes the unfinished part again in the
+    /// background, at most every PREVIEW_EVERY, only while the model has nothing else to do
+    /// (typing a finished part never waits for a preview to start).
+    fn start_preview(&mut self) {
+        if !self.cfg.live_preview || self.cfg.backend != Backend::Local || self.state != State::Recording || self.stop_at.is_some() {
+            return; // (stop_at: the key was let go, the last part comes next)
+        }
+        use std::sync::atomic::Ordering;
+        let (Some(asr), Some(seg), Some(pipe)) = (self.asr.clone(), self.segmenter.as_ref(), self.pipeline.as_ref()) else { return };
+        let (done, sent) = pipe.progress();
+        if done < sent || self.preview_busy.load(Ordering::SeqCst) || self.preview_at.elapsed() < PREVIEW_EVERY {
+            return;
+        }
+        let (start, rate, part) = (seg.start(), self.recorder.rate(), sent);
+        let window = (PREVIEW_WINDOW.as_secs_f32() * rate as f32) as usize;
+        let (raw, clipped) = self.recorder.with_buffer(|b| {
+            let from = start.max(b.len().saturating_sub(window));
+            (b.get(from..).map(<[f32]>::to_vec).unwrap_or_default(), from > start)
+        });
+        if raw.len() < rate as usize {
+            return; // under a second: nothing worth showing yet
+        }
+        self.preview_at = Instant::now();
+        self.preview_busy.store(true, Ordering::SeqCst);
+        let (busy, p, generation) = (self.preview_busy.clone(), self.proxy.clone(), self.rec_gen);
+        let (mixed, vocabulary) = (self.cfg.mixed_english, self.vocabulary.clone());
+        std::thread::spawn(move || {
+            let audio = resample(&raw, rate, SAMPLE_RATE);
+            // A finished part may have just been queued: it goes first.
+            let text = match asr.try_lock() {
+                Ok(mut asr) => asr.transcribe(&audio, mixed, &vocabulary).ok(),
+                Err(_) => None,
+            };
+            busy.store(false, Ordering::SeqCst);
+            if let Some(text) = text {
+                let _ = p.send_event(UserEvent::Preview(generation, part, text, clipped));
+            }
+        });
     }
 
     /// When the idle model is due to be freed (None: not applicable).
@@ -1370,11 +1454,14 @@ impl App {
             let hint = if self.handsfree { format!(" · tap {TALK_KEY_LABEL} to finish") } else { String::new() };
             self.status_text = format!("Listening… {done}/{sent} parts transcribed{hint}");
         }
+        self.show_heard(); // a part may have finished since (unchanged text costs nothing)
         if len as f64 / rate as f64 > MAX_RECORDING.as_secs_f64() {
             eprintln!("recording reached {} min: finishing", MAX_RECORDING.as_secs() / 60);
             self.handsfree = false;
             self.finish();
+            return;
         }
+        self.start_preview();
     }
 
     fn finish(&mut self) {
@@ -1497,6 +1584,7 @@ impl App {
             "restore": self.cfg.restore_clipboard,
             "unload": self.cfg.unload_when_idle,
             "live": self.cfg.live_typing,
+            "preview": self.cfg.live_preview,
             "autostart": self.cfg.start_at_login,
             "vocabCount": self.vocab_count,
             "correctionsCount": self.corrections_count,
@@ -1542,6 +1630,7 @@ impl App {
                     "mixed" => self.cfg.mixed_english = on,
                     "digits" => self.cfg.numbers_as_digits = on,
                     "live" => self.cfg.live_typing = on,
+                    "preview" => self.cfg.live_preview = on,
                     "restore" => self.cfg.restore_clipboard = on,
                     "unload" => {
                         self.cfg.unload_when_idle = on;

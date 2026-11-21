@@ -93,6 +93,11 @@ stops listening but leaves what was already typed. The clipboard is saved before
 part and put back after the last. Hold-to-talk still types everything on release. Off in
 Settings → Typing while you speak.
 
+**Seeing the words while you speak:** with the local model, the pill shows the end of what it
+has heard so far, updated about every 0.7 s: the unfinished part is transcribed again in the
+background (only its last 6 s, ~250 ms on an M3), only while the model has nothing else to do,
+so typing is never held up. Off in Settings → Show words in the pill.
+
 Numbers said in words become digits ("สองร้อยห้าสิบ" → 250, "สามจุดสอง" → 3.2,
 "ห้าสิบเปอร์เซ็นต์" → 50%), carefully: a lone number word only after a word that asks for a
 number (ข้อ, เวอร์ชัน, ครั้งที่…) or a Latin word, digits said one by one only from six (or

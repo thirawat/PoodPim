@@ -35,6 +35,9 @@ pub struct Config {
     /// Hands-free mode (tap the talk key): type each part as soon as it is transcribed, while
     /// the user is still speaking, instead of all of it at the end.
     pub live_typing: bool,
+    /// While listening, the pill shows what has been heard so far (local model only: it
+    /// transcribes the unfinished part again about every 0.7 s).
+    pub live_preview: bool,
     /// Said "later" to replacing the old full-precision model with the smaller int8 one.
     pub model_upgrade_declined: bool,
 }
@@ -51,6 +54,7 @@ impl Default for Config {
             numbers_as_digits: true,
             unload_when_idle: false,
             live_typing: true,
+            live_preview: true,
             model_upgrade_declined: false,
         }
     }
