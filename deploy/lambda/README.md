@@ -13,7 +13,9 @@ buildx, curl, unzip and python3:
 NAME=myteam-asr REGION=ap-southeast-1 ./deploy/lambda/setup.sh
 ```
 
-It downloads the int8 model from Hugging Face into a private S3 bucket, builds and pushes
+It downloads the int8 model from Hugging Face (and the int8 decoder from PoodPim's
+[model-decoder-int8-1](https://github.com/thirawat/PoodPim/releases/tag/model-decoder-int8-1)
+release, checked against its SHA-256) into a private S3 bucket, builds and pushes
 the image, creates the IAM role, Lambda function, logs and HTTP API, wakes it once, and
 prints the **API URL** and **API key**. Put both in PoodPim (menu → Server URL & API key…)
 and share them only with your team. It is safe to re-run: existing pieces are reused and
@@ -22,6 +24,7 @@ the key leaks).
 
 ```sh
 NAME=myteam-asr REGION=ap-southeast-1 ./deploy/lambda/deploy.sh     # update the code later
+# (also puts the int8 decoder next to the model of a deployment made before it existed)
 NAME=myteam-asr REGION=ap-southeast-1 ./deploy/lambda/teardown.sh   # remove everything
 ```
 
@@ -59,12 +62,18 @@ request at a time, so sending in parallel would start a second cold instance.
 | cold start (`/warm`) | 13.6 s (S3 fetch 11.3 s, load + warm-up 1.7 s) |
 | 6 s sentence, warm | ~0.9 s round trip (Lambda 0.63 s) |
 | 32 s recording, warm | ~3.8 s |
+
+With the int8 decoder (2026-11-21, 1.0.5, the app's vocabulary on, 10 test clips of 5-10 s):
+each clip took 0.74-1.43 s round trip instead of 1.27-2.37 s with the fp32 decoder (12.1 s
+instead of 20.8 s for all ten). Cold start: 16.5 s (one try; 13.9 s just before with fp32).
 | memory used | ~2.1 GB of 4 GB |
 
 Why int8 here: the fp32 model (2.5 GB) took 32 s to fetch from S3 (Lambda's network
 tops out around 80 MB/s) and 37 s+ when baked into the image, past API Gateway's 30 s
 limit. int8 gave the same text as fp32 on all test clips except one dropped tone mark
-in a 32 s recording ("ส่วน" → "สวน"). The desktop app keeps fp32.
+in a 32 s recording ("ส่วน" → "สวน"). The desktop app uses the same int8 files, including
+`decoder_joint.int8.onnx`, which the function prefers to `decoder_joint.onnx` when it is in
+the bucket (and falls back from if it can't load or run it).
 
 ## Resources made by setup.sh (all tagged `Project=<name>`)
 

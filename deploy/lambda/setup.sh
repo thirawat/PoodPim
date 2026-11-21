@@ -66,6 +66,7 @@ else
   done
   echo "uploaded"
 fi
+./deploy/lambda/add-int8-decoder.sh "s3://$BUCKET/$PREFIX/" "$REGION"
 
 step "ECR repository $NAME"
 aws ecr describe-repositories --region "$REGION" --repository-names "$NAME" >/dev/null 2>&1 ||

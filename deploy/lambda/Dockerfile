@@ -20,12 +20,17 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
  && cp target/release/poodpim-lambda /bootstrap
 
 FROM public.ecr.aws/lambda/provided:al2023-arm64
+# ONNX Runtime from Microsoft's NuGet package (runtimes/linux-arm64/native). The GitHub repo
+# microsoft/onnxruntime and its release downloads went 404 on 2026-11-18. The package is
+# pinned by SHA-256; its libonnxruntime.so is byte-identical to the GitHub release tarball's.
 ARG ORT_VERSION=1.32.0
-RUN dnf install -y libstdc++ tar gzip && dnf clean all \
- && mkdir -p /opt/ort \
- && curl -sSfL https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-aarch64-${ORT_VERSION}.tgz \
-    | tar -xz -C /opt/ort --strip-components=1 \
- && ln -sf /opt/ort/lib/libonnxruntime.so.${ORT_VERSION} /opt/ort/lib/libonnxruntime.so
+ARG ORT_NUPKG_SHA256=a9150bc2992cbbb6722070da9910e1ffa989a8bfc67bdd5bb8e745ca755641db
+RUN dnf install -y libstdc++ tar gzip unzip && dnf clean all \
+ && mkdir -p /opt/ort/lib && cd /tmp \
+ && curl -sSfL -o ort.nupkg https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/${ORT_VERSION}/microsoft.ml.onnxruntime.${ORT_VERSION}.nupkg \
+ && echo "${ORT_NUPKG_SHA256}  ort.nupkg" | sha256sum -c - \
+ && unzip -j -q ort.nupkg 'runtimes/linux-arm64/native/*' -d /opt/ort/lib \
+ && rm ort.nupkg
 ENV ORT_DYLIB_PATH=/opt/ort/lib/libonnxruntime.so
 ARG S5CMD_VERSION=2.3.0
 RUN mkdir -p /opt/bin && cd /tmp \
