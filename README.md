@@ -6,6 +6,7 @@
 
 <p align="center">
   <b>Hold a key, speak Thai, let go: the text is typed wherever your cursor is, in any app.</b><br>
+  Or tap it once and keep talking: each part is typed as you go.<br>
   macOS · Windows · speech recognition on your own computer · free and open source
 </p>
 
@@ -20,7 +21,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/demo.gif" width="720" alt="Demo: holding Right Option shows a 'listening' pill while the user says a Thai sentence; on release the pill turns to 'transcribing', then the sentence appears in a notes window">
+  <img src="assets/demo.gif" width="720" alt="Demo in two parts: holding Right Option, the pill shows the Thai words heard so far and the sentence appears in a notes window on release; then a single tap, two sentences spoken, the first typed as soon as the speaker pauses and the second when they tap again">
 </p>
 
 Hold a key, speak Thai (or Thai mixed with English), let go, and the text is typed where
@@ -66,7 +67,7 @@ on Windows also Settings › Apps › PoodPim.
 | | macOS | Windows |
 |---|---|---|
 | Talk | hold **Right ⌥** | hold **Right Alt** |
-| Hands-free | tap Right ⌥, tap again to finish | tap Right Alt, tap again |
+| Hands-free, typed as you speak | tap Right ⌥, tap again to finish | tap Right Alt, tap again |
 | Cancel | Esc | Esc |
 | Paste | ⌘V (clipboard restored after) | Ctrl+V (clipboard restored after) |
 
@@ -135,7 +136,7 @@ against its SHA-256 before use.
 | | Local | Serverless (AWS Lambda) |
 |---|---|---|
 | Where | this computer (int8 model, ~1 GB RAM) | Lambda in ap-southeast-7 (int8 model) |
-| 6 s sentence | ~0.45 s | ~0.9 s warm · first use after ~10 min idle: +13 s cold start |
+| 6 s sentence | ~0.3 s | ~0.9 s warm · first use after ~10 min idle: +13 s cold start |
 | Needs | model download (1 GB) | internet, server URL + API key |
 | Audio leaves the machine | no | yes (HTTPS to your own AWS account) |
 

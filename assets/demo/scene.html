@@ -1,10 +1,13 @@
 <!doctype html>
 <!--
   The README demo (assets/demo.gif), drawn frame by frame: render(t) shows the scene at t
-  seconds, and scripts/make-demo.sh captures it with headless Chrome. Mirrors the real app:
-  the pill's size, colours and bar formulas come from src/overlay.rs, the menu-bar mic turns
-  red while recording, the transcript is the app's actual output for tests/audio/th1.wav, and
-  it appears at once because the app pastes it.
+  seconds, and scripts/make-demo.sh captures it with headless Chrome. Two scenes:
+  1. hold to talk: the pill shows the words heard so far, the sentence is pasted on release;
+  2. tap (hands-free): each part is typed as soon as the speaker pauses, tap again to finish.
+  Mirrors the real app: the pill's size, colours, bar formulas and preview (re-transcribed every
+  0.7 s, its last 42 characters) come from src/overlay.rs and src/app.rs; the menu-bar mic turns
+  red while recording; the texts are the app's actual output (1.0.5) for tests/audio/th1.wav
+  and for the start of one test clip and the end of another (GPU / Nvidia / code).
 -->
 <html lang="th">
 <head>
@@ -59,8 +62,6 @@
   .doc { padding: 22px 30px; font-size: 21px; line-height: 1.65; }
   .doc h3 { font-size: 15px; font-weight: 600; color: #8A93A6; letter-spacing: 0.02em; margin-bottom: 6px; }
   .caret { display: inline-block; width: 2px; height: 1.15em; background: #2563EB; vertical-align: -0.2em; margin-left: 1px; }
-  .typed { background: transparent; border-radius: 4px; }
-  .typed.flash { background: rgba(46, 230, 201, 0.22); }
 
   /* what is being said */
   .speech {
@@ -106,6 +107,12 @@
   .step.on em { background: var(--teal); color: #052A26; }
   .step.done { color: rgba(232, 238, 246, 0.6); }
   .step.done em { background: rgba(46, 230, 201, 0.35); color: #052A26; }
+  .scene {
+    position: absolute; left: 170px; top: 38px; font-size: 13px; font-weight: 600; letter-spacing: 0.02em;
+    color: var(--teal); padding: 1px 10px; border-radius: 10px; border: 1px solid rgba(46, 230, 201, 0.45);
+  }
+  .doc .part { border-radius: 4px; }
+  .doc .part.flash { background: rgba(46, 230, 201, 0.22); }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -123,11 +130,13 @@
     <span>09:41</span>
   </div>
 
+  <div class="scene" id="scene"></div>
+
   <div class="window">
     <div class="titlebar"><i></i><i></i><i></i><span>โน้ต</span></div>
     <div class="doc">
-      <h3>โน้ตด่วน</h3>
-      <div><span class="typed" id="typed"></span><span class="caret" id="caret"></span></div>
+      <h3 id="doctitle"></h3>
+      <div><span id="typed"></span><span class="caret" id="caret"></span></div>
     </div>
   </div>
 
@@ -139,91 +148,162 @@
   <div class="keynote">Windows: Alt ขวา</div>
 
   <div class="steps">
-    <div class="step" id="s1"><em>1</em>กดค้าง</div>
-    <div class="step" id="s2"><em>2</em>พูดไทย</div>
-    <div class="step" id="s3"><em>3</em>ปล่อย → พิมพ์ให้เลย</div>
+    <div class="step" id="s1"><em>1</em><span></span></div>
+    <div class="step" id="s2"><em>2</em><span></span></div>
+    <div class="step" id="s3"><em>3</em><span></span></div>
   </div>
 
 <script>
-  // Timeline (seconds). One loop lasts DURATION.
-  const DURATION = 8.6;
-  const DOWN = 0.9, UP = 4.6, PASTE = 5.35, PILL_GONE = 6.4;
-  const SPOKEN = "สวัสดีครับ วันนี้อากาศดีมาก ผมอยากทดสอบระบบถอดเสียงภาษาไทย";
-  // The app's output for tests/audio/th1.wav (no spaces: that is how the model writes it).
-  const TYPED = "สวัสดีครับวันนี้อากาศดีมากผมอยากทดสอบระบบถอดเสียงภาษาไทย";
-  const words = [...new Intl.Segmenter("th", { granularity: "word" }).segment(SPOKEN)].map(s => s.segment);
+  // Two scenes, one after the other; times in seconds from the start of each scene.
+  // listen: when the mic is on; key: when the key is down; parts: what is said (from..to) and
+  // what the app typed for it, at `typed` (hands-free: when the speaker paused; else on release).
+  const SCENES = [
+    {
+      len: 8.6, title: "แบบกดค้าง", doc: "โน้ตด่วน",
+      steps: ["กดค้าง", "พูดไทย", "ปล่อย → พิมพ์ให้เลย"],
+      key: [[0.9, 4.6]], listen: [0.9, 4.6], paste: 5.35, gone: 6.4, handsfree: false,
+      parts: [{
+        said: "สวัสดีครับ วันนี้อากาศดีมาก ผมอยากทดสอบระบบถอดเสียงภาษาไทย",
+        // The app's output for tests/audio/th1.wav (the model writes no spaces).
+        text: "สวัสดีครับวันนี้อากาศดีมากผมอยากทดสอบระบบถอดเสียงภาษาไทย",
+        from: 1.15, to: 4.3, typed: 5.35,
+      }],
+    },
+    {
+      len: 10.4, title: "แบบแตะ: พิมพ์ระหว่างพูด", doc: "โน้ตประชุม",
+      steps: ["แตะครั้งเดียว", "พูดยาวๆ → พิมพ์ทีละช่วง", "แตะอีกครั้งเพื่อจบ"],
+      key: [[0.8, 0.95], [7.9, 8.05]], listen: [0.8, 7.9], paste: 8.4, gone: 9.4, handsfree: true,
+      parts: [
+        { said: "เราต้องใช้ GPU ของ Nvidia เพื่อ train model", text: "เราต้องใช้ GPU ของ Nvidia เพื่อ train model", from: 1.2, to: 4.0, typed: 4.95 },
+        { said: "แล้วค่อยเขียน code ด้วย Python", text: "แล้วค่อยเขียน code ด้วยไพทอน", from: 5.2, to: 7.3, typed: 8.4 },
+      ],
+    },
+  ];
+  const DURATION = SCENES.reduce((a, s) => a + s.len, 0);
+  const PREVIEW_EVERY = 0.7, PREVIEW_TAKES = 0.25, PREVIEW_CHARS = 42;
+  const seg = new Intl.Segmenter("th", { granularity: "word" });
+  const wordsOf = s => [...seg.segment(s)].map(x => x.segment);
 
   const RED = [255, 69, 59], AMBER = [255, 179, 64], GREEN = [51, 214, 74];
   const css = c => `rgb(${c[0]},${c[1]},${c[2]})`;
   const $ = id => document.getElementById(id);
 
-  // A speech-like microphone level (0..1): syllables at ~5 Hz, phrase pauses.
-  function level(t) {
-    const s = t - DOWN - 0.25;
-    if (s < 0 || t > UP - 0.2) return 0.05;
+  // The first `frac` of `text`, cut at a word boundary.
+  function upTo(text, frac) {
+    let out = "";
+    for (const w of wordsOf(text)) {
+      if (out.length + w.length > frac * text.length + 0.5) break;
+      out += w;
+    }
+    return out;
+  }
+
+  // As src/overlay.rs preview_tail: the last 42 characters, after "…" if cut.
+  function tail(text) {
+    const c = [...text.trim()];
+    if (c.length <= PREVIEW_CHARS) return c.join("");
+    let from = c.length - PREVIEW_CHARS;
+    while (from < c.length && /[ัิ-ฺ็-๎]/.test(c[from])) from++;
+    return "…" + c.slice(from).join("");
+  }
+
+  // A speech-like microphone level (0..1): syllables at ~5 Hz, quiet between parts.
+  function level(sc, u) {
+    const p = sc.parts.find(p => u >= p.from - 0.1 && u <= p.to + 0.1);
+    if (!p) return 0.05;
+    const s = u - p.from;
     const syll = Math.abs(Math.sin(s * 15.7)) * (0.7 + 0.3 * Math.sin(s * 4.1 + 1));
     const phrase = 0.55 + 0.45 * Math.max(0, Math.sin(s * 2.1 + 0.9));
     return Math.min(1, 0.3 + 0.7 * syll * phrase);
   }
 
   // Bar heights as in src/overlay.rs (fraction of 24 px, at least the bar width).
-  function bars(t, phase) {
+  function bars(sc, u, phase, since) {
     const SHAPE = [0.55, 0.8, 1.0, 0.8, 0.55];
-    const since = t - (phase === "listen" ? DOWN : phase === "work" ? UP : PASTE);
     return SHAPE.map((shape, i) => {
-      if (phase === "listen") {
-        const wobble = 0.75 + 0.25 * Math.sin(since * 9 + i * 1.3);
-        return 0.12 + 0.88 * level(t) * shape * wobble;
-      }
+      if (phase === "listen") return 0.12 + 0.88 * level(sc, u) * shape * (0.75 + 0.25 * Math.sin(since * 9 + i * 1.3));
       if (phase === "work") return 0.15 + 0.45 * (0.5 + 0.5 * Math.sin(since * 6 - i * 0.9));
       return 0.15;
     });
   }
 
+  // What the pill shows while listening (src/app.rs show_heard): the parts typed so far and
+  // the newest preview of the part being said, which stays until that part is typed.
+  function heard(sc, u) {
+    const done = sc.parts.filter(p => u >= p.typed && sc.handsfree);
+    const cur = sc.parts.find(p => !done.includes(p) && u >= p.from);
+    let pending = "";
+    if (cur) {
+      // previews start every 0.7 s once the part has 1 s of audio, and take ~0.25 s
+      const first = cur.from + 1.0;
+      const n = Math.floor((u - PREVIEW_TAKES - first) / PREVIEW_EVERY);
+      if (n >= 0) {
+        const at = first + n * PREVIEW_EVERY;
+        pending = upTo(cur.text, Math.min(1, (at - cur.from) / (cur.to - cur.from)));
+      }
+    }
+    return [...done.map(p => p.text), pending].filter(Boolean).join(" ");
+  }
+
   window.render = function (t) {
     t = ((t % DURATION) + DURATION) % DURATION;
-    const holding = t >= DOWN && t < UP;
-    const phase = t < DOWN ? "idle" : t < UP ? "listen" : t < PASTE ? "work" : t < PILL_GONE ? "done" : "idle";
-    const pasted = t >= PASTE;
+    let start = 0, sc = SCENES[0];
+    for (const s of SCENES) { if (t < start + s.len) { sc = s; break; } start += s.len; }
+    const u = t - start;
+    const [l0, l1] = sc.listen;
+    const down = sc.key.some(([a, b]) => u >= a && u < b);
+    const listening = u >= l0 && u < l1;
+    const phase = u < l0 ? "idle" : u < l1 ? "listen" : u < sc.paste ? "work" : u < sc.gone ? "done" : "idle";
 
-    $("key").classList.toggle("down", holding);
-    $("mic").classList.toggle("on", holding);
-    $("micg").setAttribute("fill", holding ? "#E53935" : "#FFFFFF");
-    $("micring").setAttribute("stroke", holding ? "#E53935" : "#FFFFFF");
+    $("scene").textContent = sc.title;
+    $("doctitle").textContent = sc.doc;
+    sc.steps.forEach((txt, i) => { $("s" + (i + 1)).querySelector("span").textContent = txt; });
 
-    // speech subtitle: words light up while the key is held
-    const speaking = t >= DOWN + 0.25 && t < UP + 0.6;
-    $("speech").classList.toggle("hidden", !speaking);
-    const progress = Math.max(0, Math.min(1, (t - DOWN - 0.3) / (UP - DOWN - 0.6)));
-    const total = SPOKEN.length;
-    let said = "", shown = 0;
-    for (const w of words) {
-      if (shown + w.length <= progress * total + 0.5) { said += w; shown += w.length; } else break;
+    $("key").classList.toggle("down", down);
+    $("mic").classList.toggle("on", listening);
+    $("micg").setAttribute("fill", listening ? "#E53935" : "#FFFFFF");
+    $("micring").setAttribute("stroke", listening ? "#E53935" : "#FFFFFF");
+
+    // speech subtitle: the part being said, its words lighting up
+    const p = sc.parts.find(p => u >= p.from - 0.1 && u < p.to + 0.5);
+    $("speech").classList.toggle("hidden", !p);
+    if (p) {
+      const said = upTo(p.said, Math.max(0, Math.min(1, (u - p.from) / (p.to - p.from))));
+      $("said").textContent = said;
+      $("unsaid").textContent = p.said.slice(said.length);
     }
-    $("said").textContent = said;
-    $("unsaid").textContent = SPOKEN.slice(said.length);
 
     // pill
-    const pill = $("pill");
-    pill.classList.toggle("hidden", phase === "idle");
+    $("pill").classList.toggle("hidden", phase === "idle");
     if (phase !== "idle") {
       const rgb = phase === "listen" ? RED : phase === "work" ? AMBER : GREEN;
-      $("label").textContent = phase === "listen" ? "กำลังฟัง…" : phase === "work" ? "กำลังถอดเสียง…" : "✓ พิมพ์แล้ว";
-      const hs = bars(t, phase);
-      [...$("bars").children].forEach((b, i) => {
-        b.style.height = Math.max(4, 24 * hs[i]) + "px";
+      const words = phase === "listen" ? heard(sc, u) : "";
+      $("label").textContent = words ? tail(words)
+        : phase === "listen" ? (sc.handsfree ? "กำลังฟัง… แตะ Right ⌥ อีกครั้งเพื่อจบ" : "กำลังฟัง…")
+        : phase === "work" ? "กำลังถอดเสียง…" : "✓ พิมพ์แล้ว";
+      const since = u - (phase === "listen" ? l0 : phase === "work" ? l1 : sc.paste);
+      bars(sc, u, phase, since).forEach((h, i) => {
+        const b = $("bars").children[i];
+        b.style.height = Math.max(4, 24 * h) + "px";
         b.style.background = css(rgb);
       });
     }
 
-    // the document
-    $("typed").textContent = pasted ? TYPED : "";
-    $("typed").classList.toggle("flash", pasted && t < PASTE + 0.45);
+    // the document: each part appears when the app types it, flashing briefly
+    const typed = $("typed");
+    typed.replaceChildren();
+    sc.parts.filter(p => u >= p.typed).forEach((p, i) => {
+      if (i > 0) typed.append(" ");
+      const span = document.createElement("span");
+      span.className = "part" + (u < p.typed + 0.45 ? " flash" : "");
+      span.textContent = p.text;
+      typed.append(span);
+    });
     const blink = Math.floor(t * 2) % 2 === 0;
-    $("caret").style.visibility = blink || holding || phase === "work" ? "visible" : "hidden";
+    $("caret").style.visibility = blink || listening || phase === "work" ? "visible" : "hidden";
 
     // steps
-    const step = t < DOWN ? 0 : t < DOWN + 0.6 ? 1 : t < UP ? 2 : t < PILL_GONE ? 3 : 4;
+    const step = u < l0 ? 0 : u < l0 + 0.6 ? 1 : u < l1 ? 2 : u < sc.gone ? 3 : 4;
     ["s1", "s2", "s3"].forEach((id, i) => {
       $(id).classList.toggle("on", step === i + 1);
       $(id).classList.toggle("done", step > i + 1 && step < 4);
