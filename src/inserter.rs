@@ -44,6 +44,61 @@ pub fn copy_text(text: &str) -> Result<()> {
     sys::put(text, false).map(|_| ())
 }
 
+/// Types the parts of one dictation while the user is still speaking, in order, on its own
+/// thread. The clipboard is saved before the first part and put back after the last one (not
+/// around every part: something the user copies between two parts would otherwise be lost).
+pub struct LiveTyper {
+    tx: std::sync::mpsc::Sender<String>,
+}
+
+impl LiveTyper {
+    /// `restore`: put the previous clipboard back once `finish` is called.
+    pub fn start(restore: bool) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let mut saved = None;
+            let mut ours = None;
+            for text in rx {
+                let _one_at_a_time = PASTING.lock().unwrap_or_else(|e| e.into_inner());
+                // First part, or the user copied something since the last one: that is what
+                // goes back at the end.
+                if restore && ours.is_none_or(|o| sys::change_count() != o) {
+                    saved = Some(sys::save());
+                }
+                match sys::put(&text, restore) {
+                    Ok(n) => ours = Some(n),
+                    Err(e) => {
+                        eprintln!("live typing: {e:#}");
+                        continue;
+                    }
+                }
+                sleep(Duration::from_millis(30));
+                crate::platform::send_paste();
+                sleep(READ_TIME); // before the clipboard changes again
+            }
+            if let (Some(saved), Some(ours)) = (saved, ours) {
+                let _one_at_a_time = PASTING.lock().unwrap_or_else(|e| e.into_inner());
+                match sys::restore(saved, ours) {
+                    Ok(true) => {}
+                    Ok(false) => eprintln!("clipboard changed while pasting: not restored"),
+                    Err(e) => eprintln!("restoring the clipboard: {e:#}"),
+                }
+            }
+        });
+        Self { tx }
+    }
+
+    /// Queues `text` to be pasted after the parts before it.
+    pub fn type_text(&self, text: String) {
+        if !text.is_empty() {
+            let _ = self.tx.send(text);
+        }
+    }
+
+    /// No more parts: the clipboard is put back after the queued ones are pasted.
+    pub fn finish(self) {}
+}
+
 #[cfg(target_os = "macos")]
 mod sys {
     //! NSPasteboard directly: every item and type is saved and restored (files copied in
@@ -101,6 +156,11 @@ mod sys {
             return Err(anyhow!("could not put the text on the clipboard"));
         }
         Ok(pb.changeCount())
+    }
+
+    /// Goes up whenever anything is put on the pasteboard.
+    pub fn change_count() -> isize {
+        NSPasteboard::generalPasteboard().changeCount()
     }
 
     /// Puts `saved` back if the pasteboard still holds what `put` wrote. Returns false if
@@ -179,6 +239,11 @@ mod sys {
             cb.set_text(text)?;
         }
         Ok(unsafe { GetClipboardSequenceNumber() } as isize)
+    }
+
+    /// Goes up whenever anything is put on the clipboard.
+    pub fn change_count() -> isize {
+        unsafe { GetClipboardSequenceNumber() as isize }
     }
 
     pub fn restore(saved: Saved, ours: isize) -> Result<bool> {

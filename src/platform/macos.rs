@@ -113,6 +113,12 @@ pub fn accessibility_trusted(prompt: bool) -> bool {
     unsafe { AXIsProcessTrustedWithOptions(opts.as_concrete_TypeRef()) }
 }
 
+/// The app in front (its process id), to tell whether the user switched apps while text was
+/// being typed. Call it on the main thread (NSWorkspace updates it there).
+pub fn focused_window() -> u64 {
+    objc2_app_kit::NSWorkspace::sharedWorkspace().frontmostApplication().map_or(0, |a| a.processIdentifier() as u64)
+}
+
 /// Windows only (an app run as administrator ignores PoodPim's ⌘V there); never on macOS.
 pub fn foreground_is_elevated() -> bool {
     false

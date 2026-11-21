@@ -26,7 +26,7 @@
 Hold a key, speak Thai (or Thai mixed with English), let go, and the text is typed where
 your cursor is. Speech recognition runs locally on the CPU with
 [iapp/OpenThai2.0-ASR-Streaming-ONNX](https://huggingface.co/iapp/OpenThai2.0-ASR-Streaming-ONNX)
-(640M-parameter FastConformer + RNN-T, int8 encoder), or on your own AWS Lambda.
+(640M-parameter FastConformer + RNN-T, int8 encoder and decoder), or on your own AWS Lambda.
 
 Written in Rust: one ~22 MB binary, ONNX Runtime linked in statically.
 
@@ -84,6 +84,14 @@ digits, the vocabulary and corrections files (with their counts and an inline "a
 correction"), restore clipboard, free memory when idle, start at login, updates, the log
 folder, and uninstall. On macOS the app gets a Dock icon and an Edit menu (⌘C / ⌘V in the
 fields) only while the window is open.
+
+**Typing while you speak (hands-free):** tap the talk key once and keep talking. Each time
+you pause for about half a second (after at least 3 s of speech) the part you've finished is
+typed straight away, instead of all of it when you tap again. Switch to another window
+meanwhile and typing stops; the rest is put on the clipboard at the end for you to paste. Esc
+stops listening but leaves what was already typed. The clipboard is saved before the first
+part and put back after the last. Hold-to-talk still types everything on release. Off in
+Settings → Typing while you speak.
 
 Numbers said in words become digits ("สองร้อยห้าสิบ" → 250, "สามจุดสอง" → 3.2,
 "ห้าสิบเปอร์เซ็นต์" → 50%), carefully: a lone number word only after a word that asks for a
@@ -157,6 +165,15 @@ replace it with int8 and deletes the fp32 files after the int8 model has loaded.
 [tools/asr-eval](tools/asr-eval/eval.py) (60 clips of fast Thai/English tech talk) int8 was
 as accurate (CER 26.0% vs 25.5%, within noise) with 0.99 GB instead of 2.64 GB of RAM and a
 2.3× faster encoder.
+
+The decoder is int8 too: `decoder_joint.int8.onnx` (27 MB instead of 102 MB) comes from this
+repo's [model-decoder-int8-1](https://github.com/thirawat/PoodPim/releases/tag/model-decoder-int8-1)
+release, made with [tools/quantize-decoder.py](tools/quantize-decoder.py). A model downloaded
+before it existed gets it in the background, and the app loads it once you're not dictating;
+without it the fp32 decoder is used. On tools/asr-eval with the bundled vocabulary it was as
+accurate (CER 24.0 vs 23.9% on the tech set, 26.0 vs 26.0% on the BA set; English words found
+63.0 vs 63.7% and 50.0 vs 48.8%), and the beam search spends 2.7× less time in the decoder:
+a whole run of the tech set took 31 s instead of 52 s.
 
 ## Vocabulary (English terms)
 

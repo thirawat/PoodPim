@@ -19,12 +19,27 @@ use crate::features::SAMPLE_RATE;
 const MIN_SEGMENT_S: f32 = 0.3;
 
 pub struct Outcome {
-    /// Segment texts joined with spaces (a pause in Thai writing is a space).
+    /// Segment texts joined with spaces (a pause in Thai writing is a space), see `join_parts`.
     pub text: String,
+    /// The segments' texts, in order, empty ones left out (each was also given to `on_part`).
+    pub parts: Vec<String>,
     pub segments: usize,
     pub audio_s: f32,
     /// Errors for segments that failed twice; their audio is missing from `text`.
     pub errors: Vec<String>,
+}
+
+/// Joins the texts of consecutive segments: a cut is at a pause, which Thai writes as a space,
+/// except before an ending particle (as inside a segment, see asr::starts_with_particle).
+pub fn join_parts<S: AsRef<str>>(parts: &[S]) -> String {
+    let mut out = String::new();
+    for p in parts.iter().map(AsRef::as_ref).filter(|p| !p.is_empty()) {
+        if !out.is_empty() && !crate::asr::starts_with_particle(p) {
+            out.push(' ');
+        }
+        out.push_str(p);
+    }
+    out
 }
 
 pub struct Pipeline {
@@ -37,10 +52,12 @@ pub struct Pipeline {
 
 impl Pipeline {
     /// `transcribe` runs on the worker thread for each 16 kHz segment. `wait_first` (e.g. the
-    /// serverless wake-up call) is joined before the first segment is sent.
+    /// serverless wake-up call) is joined before the first segment is sent. `on_part` gets each
+    /// segment's (non-empty) text as soon as it is ready, in order.
     pub fn start(
         mut transcribe: impl FnMut(&[f32]) -> Result<String> + Send + 'static,
         wait_first: Option<JoinHandle<()>>,
+        mut on_part: impl FnMut(&str) + Send + 'static,
     ) -> Self {
         let (tx, rx) = channel::<Vec<f32>>();
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -50,8 +67,7 @@ impl Pipeline {
             if let Some(w) = wait_first {
                 let _ = w.join();
             }
-            let mut out = Outcome { text: String::new(), segments: 0, audio_s: 0.0, errors: Vec::new() };
-            let mut parts: Vec<String> = Vec::new();
+            let mut out = Outcome { text: String::new(), parts: Vec::new(), segments: 0, audio_s: 0.0, errors: Vec::new() };
             for seg in rx {
                 if c.load(Ordering::SeqCst) {
                     break;
@@ -68,7 +84,8 @@ impl Pipeline {
                             let shown = if std::io::stderr().is_terminal() { t.as_str() } else { "(text not logged)" };
                             eprintln!("segment {}: {secs:.1}s → {:.2}s: {shown}", out.segments + 1, t0.elapsed().as_secs_f32());
                             if !t.trim().is_empty() {
-                                parts.push(t.trim().to_string());
+                                on_part(t.trim());
+                                out.parts.push(t.trim().to_string());
                             }
                         }
                         Err(e) => out.errors.push(format!("{e:#}")),
@@ -78,7 +95,7 @@ impl Pipeline {
                 }
                 d.fetch_add(1, Ordering::SeqCst);
             }
-            out.text = parts.join(" ");
+            out.text = join_parts(&out.parts);
             out
         });
         Self { tx: Some(tx), worker: Some(worker), cancelled, done, sent: 0 }

@@ -6,12 +6,17 @@
 //! transcribed while the user is still talking.
 //!
 //! Rules, applied to the audio after the previous cut:
-//! - a pause ≥ 0.5 s once the segment is ≥ 8 s long → cut in the middle of the pause;
+//! - a pause ≥ 0.5 s once the segment is ≥ 8 s long → cut in the middle of the pause (3 s while
+//!   typing as the user speaks, so text appears sooner). On tools/asr-eval the extra cuts cost
+//!   little: CER 23.9 → 23.6% on the tech set, 26.0 → 27.1% on the BA set (4.5 s and 6 s gave
+//!   27.0 and 26.9%: it is cutting at all that costs, not how short), so only hands-free
+//!   typing uses them;
 //! - a pause ≥ 1.2 s once the segment is ≥ 2 s long → cut (long pauses hurt the model);
 //! - no pause by 25 s → cut at the quietest 0.2 s in the last 6 s.
 
 const FRAME_MS: usize = 20;
 const MIN_SEG_S: f32 = 8.0;
+const LIVE_MIN_SEG_S: f32 = 3.0;
 const SHORT_MIN_SEG_S: f32 = 2.0;
 const PAUSE_S: f32 = 0.5;
 const LONG_PAUSE_S: f32 = 1.2;
@@ -20,11 +25,19 @@ const MAX_SEG_S: f32 = 25.0;
 pub struct Segmenter {
     rate: usize,
     start: usize,
+    /// Pauses of PAUSE_S cut once the segment is this long.
+    min_len: f32,
 }
 
 impl Segmenter {
     pub fn new(rate: u32) -> Self {
-        Self { rate: rate as usize, start: 0 }
+        Self { rate: rate as usize, start: 0, min_len: MIN_SEG_S }
+    }
+
+    /// Shorter segments, for typing the text while the user is still speaking.
+    pub fn set_live(&mut self) {
+        // POODPIM_LIVE_MIN_S: for re-tuning on tools/asr-eval, not for users.
+        self.min_len = std::env::var("POODPIM_LIVE_MIN_S").ok().and_then(|v| v.parse().ok()).unwrap_or(LIVE_MIN_SEG_S);
     }
 
     /// Where the current (unfinished) segment begins, in samples.
@@ -36,7 +49,7 @@ impl Segmenter {
     /// its `(start, end)` sample range and moves past it.
     pub fn poll(&mut self, buf: &[f32]) -> Option<(usize, usize)> {
         let pending = buf.get(self.start..)?;
-        let cut = find_cut(pending, self.rate)?;
+        let cut = find_cut(pending, self.rate, self.min_len)?;
         let range = (self.start, self.start + cut);
         self.start += cut;
         Some(range)
@@ -88,7 +101,7 @@ pub fn quiet_frames(audio: &[f32], rate: usize) -> Vec<bool> {
 pub const QUIET_FRAME_MS: usize = FRAME_MS;
 
 /// Returns a cut position (in samples from the start of `pending`) if a segment is ready.
-fn find_cut(pending: &[f32], rate: usize) -> Option<usize> {
+fn find_cut(pending: &[f32], rate: usize, min_len: f32) -> Option<usize> {
     let frame = rate * FRAME_MS / 1000;
     let db = frame_db(pending, frame);
     let secs = |frames: usize| frames as f32 * FRAME_MS as f32 / 1000.0;
@@ -108,7 +121,7 @@ fn find_cut(pending: &[f32], rate: usize) -> Option<usize> {
         }
         if let Some(rs) = run_start.take() {
             let (run, at) = (secs(i - rs), secs(rs));
-            if (at >= MIN_SEG_S && run >= PAUSE_S) || (at >= SHORT_MIN_SEG_S && run >= LONG_PAUSE_S) {
+            if (at >= min_len && run >= PAUSE_S) || (at >= SHORT_MIN_SEG_S && run >= LONG_PAUSE_S) {
                 return Some((rs + i) / 2 * frame);
             }
         }
@@ -116,7 +129,7 @@ fn find_cut(pending: &[f32], rate: usize) -> Option<usize> {
     // A pause still going on at the end of the buffer (the user has stopped for now).
     if let Some(rs) = run_start {
         let (run, at) = (secs(db.len() - rs), secs(rs));
-        if (at >= MIN_SEG_S && run >= PAUSE_S) || (at >= SHORT_MIN_SEG_S && run >= LONG_PAUSE_S) {
+        if (at >= min_len && run >= PAUSE_S) || (at >= SHORT_MIN_SEG_S && run >= LONG_PAUSE_S) {
             return Some((rs + db.len()) / 2 * frame);
         }
     }
@@ -160,6 +173,18 @@ mod tests {
         a.extend(vec![0.0; rate / 2]); // 0.5 s pause at 3 s: too early
         a.extend(tone(3.0, rate));
         assert_eq!(split(&a, rate as u32).len(), 1);
+    }
+
+    #[test]
+    fn live_cuts_shorter_pauses_earlier() {
+        let rate = 16_000;
+        let mut a = tone(3.5, rate);
+        a.extend(vec![0.0; rate * 6 / 10]); // 0.6 s pause at 3.5 s
+        a.extend(tone(3.0, rate));
+        assert_eq!(split(&a, rate as u32).len(), 1);
+        let mut seg = Segmenter::new(rate as u32);
+        seg.set_live();
+        assert!(seg.poll(&a).is_some());
     }
 
     #[test]

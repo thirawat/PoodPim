@@ -102,6 +102,11 @@ pub fn send_paste() {
     send_keys(&[(VK_CONTROL, true), (VK_V, true), (VK_V, false), (VK_CONTROL, false)]);
 }
 
+/// The window in front, to tell whether the user switched windows while text was being typed.
+pub fn focused_window() -> u64 {
+    unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize as u64 }
+}
+
 /// Whether the focused window belongs to an app run as administrator. Windows silently drops
 /// keystrokes sent to it from a normal app, so Ctrl+V from PoodPim would do nothing.
 pub fn foreground_is_elevated() -> bool {

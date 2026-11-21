@@ -52,6 +52,25 @@ const PARTICLES: &[&str] = &[
     "ครับ", "ค่ะ", "คะ", "ค่า", "นะ", "น่ะ", "ฮะ", "ฮับ", "เนี่ย", "อะ", "อ่ะ", "จ้ะ", "จ้า", "แหละ", "ล่ะ", "มั้ย", "ไหม", "เหรอ", "หรอ",
 ];
 
+/// Whether `text` starts with an ending particle as a word of its own, not the start of a
+/// longer word: "อะไร", "คะแนน", "ค่าใช้จ่าย", "ไหม้" don't count.
+pub fn starts_with_particle(text: &str) -> bool {
+    PARTICLES.iter().any(|p| {
+        let Some(after) = text.strip_prefix(p) else { return false };
+        let next = after.chars().next();
+        // A vowel sign or tone mark next belongs to the same syllable ("ไหม้").
+        let same_syllable = next.is_some_and(|c| matches!(c, '\u{0E31}' | '\u{0E33}'..='\u{0E3A}' | '\u{0E47}'..='\u{0E4E}'));
+        let longer_word = match *p {
+            "อะ" => after.starts_with("ไร"),
+            "คะ" => after.starts_with("แนน"),
+            // ค่า at the start of a clause is nearly always the noun (ค่าไฟ, ค่าเฉลี่ย).
+            "ค่า" => next.is_some_and(starts_thai_word),
+            _ => false,
+        };
+        !same_syllable && !longer_word
+    })
+}
+
 /// Turns pause marks into spaces, except before an ending particle.
 fn pause_spaces(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -59,7 +78,7 @@ fn pause_spaces(text: &str) -> String {
     while let Some(i) = rest.find(PAUSE) {
         out.push_str(&rest[..i]);
         rest = &rest[i + PAUSE.len_utf8()..];
-        if !PARTICLES.iter().any(|p| rest.starts_with(p)) {
+        if !starts_with_particle(rest) {
             out.push(' ');
         }
     }
@@ -140,7 +159,8 @@ impl OpenThaiAsr {
         let env_n = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
         let threads = env_n("POODPIM_ENC_THREADS", cores.min(4));
-        let dec_threads = env_n("POODPIM_DEC_THREADS", 2);
+        // The int8 decoder: 2.36 s with 4 threads vs 2.80 s with 2 (M3, 11 clips).
+        let dec_threads = env_n("POODPIM_DEC_THREADS", cores.min(4));
         let build = |path: std::path::PathBuf, threads: usize| -> Result<Session> {
             Session::builder(&env)?
                 // ort defaults to MaxEfficiency, which on macOS routes the model through CoreML;
@@ -153,8 +173,11 @@ impl OpenThaiAsr {
                 .with_context(|| format!("loading {}", path.display()))
         };
         let enc_path = crate::model::encoder_path(dir).ok_or_else(|| anyhow!("no encoder in {}", dir.display()))?;
+        let dec_path = crate::model::decoder_path(dir);
+        let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        eprintln!("loading {} + {} ({threads}/{dec_threads} threads)", name(&enc_path), name(&dec_path));
         let encoder = build(enc_path, threads)?;
-        let decoder = build(dir.join("decoder_joint.onnx"), dec_threads)?;
+        let decoder = build(dec_path, dec_threads)?;
         let tokens: Vec<String> = std::fs::read_to_string(dir.join("tokens.txt"))
             .context("reading tokens.txt")?
             .lines()
@@ -412,6 +435,10 @@ mod tests {
         let p = PAUSE;
         assert_eq!(pause_spaces(&format!("ข้อสามคือ{p}ยอดขาย")), "ข้อสามคือ ยอดขาย");
         assert_eq!(pause_spaces(&format!("ยังไง{p}นะครับ{p}แน่นอน")), "ยังไงนะครับ แน่นอน");
+        // Words that only start like a particle still get their space.
+        assert_eq!(pause_spaces(&format!("ทำแบบนี้{p}อะไรก็ได้")), "ทำแบบนี้ อะไรก็ได้");
+        assert_eq!(pause_spaces(&format!("ข้อสอบ{p}คะแนนดี{p}ค่าใช้จ่ายต่ำ{p}ไหม้หมด")), "ข้อสอบ คะแนนดี ค่าใช้จ่ายต่ำ ไหม้หมด");
+        assert_eq!(pause_spaces(&format!("ได้{p}ค่ะ{p}ดีไหม{p}คะ")), "ได้ค่ะ ดีไหมคะ");
     }
 
     #[test]

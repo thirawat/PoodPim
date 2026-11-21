@@ -18,11 +18,15 @@ const USAGE: &str = "poodpim — Thai push-to-talk dictation
 
 USAGE:
   poodpim                         start the tray / menu-bar app
-  poodpim transcribe <wav>... [--thai-only] [--server] [--live] [--vocabulary FILE | --no-vocabulary]
+  poodpim transcribe <wav>... [--thai-only] [--server] [--live | --live-typing] [--vocabulary FILE | --no-vocabulary]
                                [--corrections FILE] [--no-digits]
                                 --server: send to the configured Lambda instead of the local model
                                 --live:   feed the file in real time like the microphone and report
                                           the wait after release
+                                --live-typing: as --live, with the app's hands-free typing:
+                                          shorter parts, each shown when it would be typed
+                                --short-parts: cut the file into the shorter parts of hands-free
+                                          typing (without feeding it in real time)
                                 --vocabulary: word list to favour (default: the app's, see
                                           `poodpim config`); --no-vocabulary: plain decoding
                                 --corrections: replacements to apply to the text (the app uses
@@ -132,7 +136,8 @@ fn postprocess(args: &[String]) -> Result<()> {
 fn transcribe(args: &[String]) -> Result<()> {
     let thai_only = args.iter().any(|a| a == "--thai-only");
     let use_server = args.iter().any(|a| a == "--server");
-    let live = args.iter().any(|a| a == "--live");
+    let live_typing = args.iter().any(|a| a == "--live-typing");
+    let live = live_typing || args.iter().any(|a| a == "--live");
     let vocab_file = args.iter().position(|a| a == "--vocabulary").and_then(|i| args.get(i + 1)).cloned();
     let vocab_text = if args.iter().any(|a| a == "--no-vocabulary") {
         String::new()
@@ -162,14 +167,24 @@ fn transcribe(args: &[String]) -> Result<()> {
     }
     let mixed = !thai_only;
     // The same segment-by-segment path the app uses.
+    // --live-typing: when each part would be typed, in seconds of the recording.
+    let t_file = Arc::new(Mutex::new(Instant::now()));
+    let on_part = move |t0: Arc<Mutex<Instant>>| {
+        move |t: &str| {
+            if live_typing {
+                eprintln!("  typed at {:.1}s: {}", t0.lock().unwrap().elapsed().as_secs_f32(), t);
+            }
+        }
+    };
     let make_pipeline: Box<dyn Fn() -> Pipeline> = if use_server {
         let server = Config::load().server();
         let t0 = Instant::now();
         let load_ms = server.warm()?;
         eprintln!("warm: {:.2}s round trip (server model load {load_ms} ms)", t0.elapsed().as_secs_f32());
+        let tf = t_file.clone();
         Box::new(move || {
             let (s, h) = (server.clone(), vocab_header.clone());
-            Pipeline::start(move |a: &[f32]| s.transcribe(a, mixed, &h), None)
+            Pipeline::start(move |a: &[f32]| s.transcribe(a, mixed, &h), None, on_part(tf.clone()))
         })
     } else {
         let dir = model::model_dir();
@@ -179,9 +194,10 @@ fn transcribe(args: &[String]) -> Result<()> {
         let t0 = Instant::now();
         let asr = Arc::new(Mutex::new(asr::OpenThaiAsr::load(&dir)?));
         eprintln!("loaded model in {:.1}s", t0.elapsed().as_secs_f32());
+        let tf = t_file.clone();
         Box::new(move || {
             let (a, v) = (asr.clone(), vocabulary.clone());
-            Pipeline::start(move |x: &[f32]| a.lock().unwrap().transcribe(x, mixed, &v), None)
+            Pipeline::start(move |x: &[f32]| a.lock().unwrap().transcribe(x, mixed, &v), None, on_part(tf.clone()))
         })
     };
     for f in files {
@@ -189,7 +205,11 @@ fn transcribe(args: &[String]) -> Result<()> {
         let secs = audio.len() as f32 / features::SAMPLE_RATE as f32;
         let mut pipe = make_pipeline();
         let t0 = Instant::now();
+        *t_file.lock().unwrap() = t0;
         let mut seg = Segmenter::new(features::SAMPLE_RATE);
+        if live_typing || args.iter().any(|a| a == "--short-parts") {
+            seg.set_live();
+        }
         if live {
             // Feed the file in real time, as the microphone would, polling like the app does.
             let step = features::SAMPLE_RATE as usize / 4;

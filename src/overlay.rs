@@ -109,6 +109,14 @@ impl Overlay {
                 v.hide();
             } else {
                 v.show(&self.phase.label(), self.phase.rgb());
+                if !v.on_active_space() {
+                    // A new panel joins the Spaces there are now (see View::on_active_space).
+                    eprintln!("overlay: not on the current Space, made again");
+                    self.view = sys::View::new();
+                    if let Some(v) = &self.view {
+                        v.show(&self.phase.label(), self.phase.rgb());
+                    }
+                }
             }
         }
         self.tick();
@@ -290,6 +298,22 @@ mod mac {
 
         pub fn hide(&self) {
             unsafe { self.panel.orderOut(None) };
+        }
+
+        /// Whether the panel is on the Space the user is looking at. A panel made to join all
+        /// Spaces was seen missing from a full-screen Space (a Zoom meeting) that, it seems,
+        /// came after it: it stayed on the first desktop only.
+        pub fn on_active_space(&self) -> bool {
+            unsafe { self.panel.isOnActiveSpace() }
+        }
+    }
+
+    impl Drop for View {
+        fn drop(&mut self) {
+            unsafe {
+                self.panel.orderOut(None);
+                self.panel.close();
+            }
         }
     }
 }
@@ -487,6 +511,11 @@ mod win {
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
             }
+        }
+
+        /// Windows has no Spaces: a topmost window is on every virtual desktop's screen.
+        pub fn on_active_space(&self) -> bool {
+            true
         }
     }
 

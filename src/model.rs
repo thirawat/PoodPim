@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 #[cfg(feature = "desktop")]
-pub use download::{download, remote_sizes};
+pub use download::{download, download_decoder_int8, remote_sizes};
 
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 /// A fixed revision of the model repo: the files PoodPim was tuned and tested with, whatever
@@ -17,6 +17,12 @@ const ZIP_NAME: &str = "openthai2.0-asr-streaming-int8.asr.zip";
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 const DATA_NAME: &str = "encoder.int8.onnx.data";
 const REQUIRED: [&str; 2] = ["decoder_joint.onnx", "tokens.txt"];
+/// decoder_joint.onnx quantized to int8 (tools/quantize-decoder.py), from PoodPim's own GitHub
+/// release: as accurate on tools/asr-eval, 2.7x faster beam search. Optional: without it (an
+/// older download, or no network) the fp32 decoder is used.
+pub const DECODER_INT8: &str = "decoder_joint.int8.onnx";
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+const RELEASE_URL: &str = "https://github.com/thirawat/PoodPim/releases/download/model-decoder-int8-1";
 
 /// `$POODPIM_MODEL_DIR`, else `<data dir>/poodpim/openthai-asr`
 /// (macOS: ~/Library/Application Support, Windows: %APPDATA%).
@@ -52,6 +58,12 @@ pub fn encoder_path(dir: &Path) -> Option<PathBuf> {
         .find(|p| p.is_file() && p.with_extension("onnx.data").is_file())
 }
 
+/// The decoder: the int8 one if it has been downloaded, else the fp32 one from the zip.
+pub fn decoder_path(dir: &Path) -> PathBuf {
+    let int8 = dir.join(DECODER_INT8);
+    if int8.is_file() { int8 } else { dir.join("decoder_joint.onnx") }
+}
+
 /// The model in `dir` is the old full-precision one only (worth replacing with int8).
 pub fn is_fp32_only(dir: &Path) -> bool {
     encoder_path(dir).is_some_and(|p| p.file_name().is_some_and(|n| n == "encoder.onnx"))
@@ -75,14 +87,18 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 
-use super::{DATA_NAME, REPO_URL, ZIP_NAME, is_ready};
+use super::{DATA_NAME, DECODER_INT8, RELEASE_URL, REPO_URL, ZIP_NAME, is_ready};
 
-/// The files to download, their sizes and SHA-256 (of the pinned revision in `REPO_URL`).
-const FILES: [(&str, u64, &str); 3] = [
-    (DATA_NAME, 883_175_424, "39176685a17087bc45a2a002cdc760951ccc4781693780a59db2b2a05ae964a5"),
-    (ZIP_NAME, 109_014_005, "6714a3333dbbef388aab0a0623a73da19953d9473dc59b98a77dda1a48911553"),
-    ("LICENSE", 2_619, "116493ed1369502b5e29cc559a8fa009a371bae926e769038ebb09885b091221"),
+/// The files to download, their sizes, SHA-256 and where they are (the pinned revision in
+/// `REPO_URL`, the int8 decoder in PoodPim's release).
+const FILES: [(&str, u64, &str, &str); 4] = [
+    (DATA_NAME, 883_175_424, "39176685a17087bc45a2a002cdc760951ccc4781693780a59db2b2a05ae964a5", REPO_URL),
+    (ZIP_NAME, 109_014_005, "6714a3333dbbef388aab0a0623a73da19953d9473dc59b98a77dda1a48911553", REPO_URL),
+    ("LICENSE", 2_619, "116493ed1369502b5e29cc559a8fa009a371bae926e769038ebb09885b091221", REPO_URL),
+    DECODER_INT8_FILE,
 ];
+const DECODER_INT8_FILE: (&str, u64, &str, &str) =
+    (DECODER_INT8, 26_924_845, "f5f5a06684cb64e94487d9b1d411ec0829c7a6fa5c1af74c87c0e1a9577f6c7e", RELEASE_URL);
 /// Tries per file. Each try carries on from the bytes already saved.
 const ATTEMPTS: u32 = 6;
 /// No bytes for this long: the connection is stuck, start a new one (resuming).
@@ -95,10 +111,10 @@ pub fn download(dir: &Path, progress: &dyn Fn(u64, u64)) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let total: u64 = FILES.iter().map(|f| f.1).sum();
     let mut done = 0u64;
-    for (f, size, sha) in FILES {
+    for (f, size, sha, base) in FILES {
         let dest = dir.join(f);
         if !(dest.is_file() && dest.metadata()?.len() == size) {
-            fetch(f, &dest, size, sha, &|n| progress(done + n, total))?;
+            fetch(base, f, &dest, size, sha, &|n| progress(done + n, total))?;
         }
         done += size;
     }
@@ -123,6 +139,12 @@ pub fn download(dir: &Path, progress: &dyn Fn(u64, u64)) -> Result<()> {
     Ok(())
 }
 
+/// Adds the int8 decoder to a model downloaded before it existed (27 MB).
+pub fn download_decoder_int8(dir: &Path) -> Result<()> {
+    let (f, size, sha, base) = DECODER_INT8_FILE;
+    fetch(base, f, &dir.join(f), size, sha, &|_| {})
+}
+
 /// HTTP client using the OS TLS stack (Security.framework / SChannel): no C toolchain needed to cross-build.
 fn agent() -> ureq::Agent {
     use ureq::tls::{TlsConfig, TlsProvider};
@@ -137,18 +159,18 @@ fn agent() -> ureq::Agent {
 
 /// Remote file sizes, without downloading (for `poodpim download --check`).
 pub fn remote_sizes() -> Result<Vec<(&'static str, u64)>> {
-    FILES.iter().map(|&(f, _, _)| Ok((f, remote_size(f)?))).collect()
+    FILES.iter().map(|&(f, _, _, base)| Ok((f, remote_size(base, f)?))).collect()
 }
 
-fn remote_size(file: &str) -> Result<u64> {
-    let resp = agent().head(&format!("{REPO_URL}/{file}")).call()?;
+fn remote_size(base: &str, file: &str) -> Result<u64> {
+    let resp = agent().head(&format!("{base}/{file}")).call()?;
     let h = resp.headers();
     let v = h.get("x-linked-size").or_else(|| h.get("content-length")).ok_or_else(|| anyhow!("no size"))?;
     Ok(v.to_str()?.parse()?)
 }
 
 /// Downloads `file` to `dest` through `<dest>.part`, retrying and resuming, then checks it.
-fn fetch(file: &str, dest: &Path, size: u64, sha256: &str, progress: &dyn Fn(u64)) -> Result<()> {
+fn fetch(base: &str, file: &str, dest: &Path, size: u64, sha256: &str, progress: &dyn Fn(u64)) -> Result<()> {
     let part = part_path(dest);
     let mut last_err = None;
     let mut attempt = 0;
@@ -161,7 +183,7 @@ fn fetch(file: &str, dest: &Path, size: u64, sha256: &str, progress: &dyn Fn(u64
             eprintln!("download {file}: retrying in {} s ({:#})", wait.as_secs(), last_err.as_ref().unwrap());
             std::thread::sleep(wait);
         }
-        match fetch_once(file, &part, size, progress) {
+        match fetch_once(base, file, &part, size, progress) {
             Ok(()) => {
                 let got = sha256_of(&part)?;
                 if got == sha256 {
@@ -192,7 +214,7 @@ fn part_path(dest: &Path) -> PathBuf {
 }
 
 /// One request: asks for the bytes after those already in `part` and appends them.
-fn fetch_once(file: &str, part: &Path, size: u64, progress: &dyn Fn(u64)) -> Result<()> {
+fn fetch_once(base: &str, file: &str, part: &Path, size: u64, progress: &dyn Fn(u64)) -> Result<()> {
     let mut have = part.metadata().map(|m| m.len()).unwrap_or(0);
     if have > size {
         std::fs::remove_file(part)?;
@@ -202,7 +224,7 @@ fn fetch_once(file: &str, part: &Path, size: u64, progress: &dyn Fn(u64)) -> Res
         progress(have);
         return Ok(());
     }
-    let mut req = agent().get(&format!("{REPO_URL}/{file}"));
+    let mut req = agent().get(&format!("{base}/{file}"));
     if have > 0 {
         req = req.header("Range", format!("bytes={have}-"));
     }

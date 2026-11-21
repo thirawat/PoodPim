@@ -34,8 +34,9 @@ use crate::{inserter, model, update};
 const TAP: Duration = Duration::from_millis(300);
 /// Safety cap on one recording; it is finished automatically after this.
 const MAX_RECORDING: Duration = Duration::from_secs(10 * 60);
-/// How often the recording is checked for a finished segment.
-const POLL: Duration = Duration::from_millis(250);
+/// How often the recording is checked for a finished segment (sooner = typed sooner while
+/// speaking hands-free; the event loop already wakes each overlay frame while recording).
+const POLL: Duration = Duration::from_millis(100);
 /// How many transcripts the Recent menu keeps (in memory only, gone when the app quits).
 const RECENT: usize = 10;
 /// Recording goes on this long after the talk key is let go: people let go while saying the
@@ -62,6 +63,10 @@ enum UserEvent {
     /// The model freed when idle was loaded again for a recording (see `asleep`).
     ModelWoke(u64, Result<Arc<Mutex<OpenThaiAsr>>, String>),
     Transcribed(u64, Outcome),
+    /// One segment's text, as soon as it is transcribed (the recording may still go on).
+    Part(u64, String),
+    /// The int8 decoder was added to a model downloaded before it existed.
+    DecoderInt8(Result<(), String>),
     Warmed(Result<u64, String>),
     ServerSettings(Option<(String, String)>),
     ApiKey(Option<String>),
@@ -156,6 +161,12 @@ struct App {
     pipeline: Option<Pipeline>,
     /// Bumped per recording so results of a cancelled one are ignored.
     rec_gen: u64,
+    /// Typing while the user speaks (hands-free, `live_typing`): parts of this recording
+    /// transcribed so far, the parts typed (after corrections), and the typer with the window
+    /// it types into. A part is typed only if every part before it was.
+    parts_heard: usize,
+    typed: Vec<String>,
+    typer: Option<(inserter::LiveTyper, u64)>,
     last_server_ok: Option<Instant>,
     dialog_open: bool,
     /// The OS hasn't let us watch the keyboard yet (macOS Accessibility).
@@ -190,6 +201,8 @@ struct App {
     model_upgrading: bool,
     model_swap_pending: bool,
     remove_fp32_after_load: bool,
+    /// Fetching the int8 decoder was started this session (tried again at the next launch).
+    decoder_int8_started: bool,
 }
 
 /// Locks a file in the settings folder; None if another copy of the app holds it.
@@ -289,6 +302,9 @@ pub fn run() -> Result<()> {
         segmenter: None,
         pipeline: None,
         rec_gen: 0,
+        parts_heard: 0,
+        typed: Vec::new(),
+        typer: None,
         last_server_ok: None,
         dialog_open: false,
         needs_permission: false,
@@ -311,6 +327,7 @@ pub fn run() -> Result<()> {
         model_upgrading: false,
         model_swap_pending: false,
         remove_fp32_after_load: false,
+        decoder_int8_started: false,
     };
     app.reload_vocabulary();
     let mut ui: Option<Ui> = None;
@@ -676,6 +693,7 @@ impl App {
                             model::remove_fp32(&dir);
                             eprintln!("using the int8 model; removed the fp32 one");
                         }
+                        self.fetch_decoder_int8();
                     }
                     Err(e) => self.fail(&e),
                 }
@@ -782,14 +800,37 @@ impl App {
                         e.chars().take(60).collect::<String>()
                     );
                 }
-                if !out.text.is_empty() {
-                    let text = corrections::finish(&out.text, &self.corrections, self.cfg.numbers_as_digits);
-                    eprintln!("{:.1}s in {} segment(s): {}", out.audio_s, out.segments, said(&text));
+                // Parts already typed while the user spoke; the rest is pasted now.
+                let typed = std::mem::take(&mut self.typed);
+                let typer = self.typer.take();
+                let rest = crate::pipeline::join_parts(out.parts.get(typed.len()..).unwrap_or_default());
+                let rest = if rest.is_empty() { rest } else { corrections::finish(&rest, &self.corrections, self.cfg.numbers_as_digits) };
+                let text = crate::pipeline::join_parts(&typed.iter().chain([&rest]).collect::<Vec<_>>());
+                if !text.is_empty() {
+                    eprintln!("{:.1}s in {} segment(s), {} typed live: {}", out.audio_s, out.segments, typed.len(), said(&text));
                     self.last_text = text.clone();
                     self.recent.push_front(text.clone());
                     self.recent.truncate(RECENT);
                     self.recent_dirty = true;
-                    let phase = self.paste(text);
+                    let phase = match typer {
+                        Some(_) if rest.is_empty() => Phase::Done,
+                        Some((typer, window)) if platform::focused_window() == window && !platform::foreground_is_elevated() => {
+                            typer.type_text(continuation(&typed, &rest));
+                            Phase::Done
+                        }
+                        Some((typer, _)) => {
+                            eprintln!("the focused window changed while typing: copied the rest");
+                            typer.finish();
+                            match inserter::copy_text(&rest) {
+                                Ok(()) => Phase::Copied,
+                                Err(e) => {
+                                    eprintln!("copy error: {e:#}");
+                                    Phase::Failed
+                                }
+                            }
+                        }
+                        None => self.paste(rest),
+                    };
                     self.overlay.set(phase);
                 } else if !out.errors.is_empty() {
                     self.overlay.set(Phase::Failed);
@@ -917,9 +958,32 @@ impl App {
                     }
                 }
             }
+            UserEvent::Part(generation, text) => self.type_part(generation, text),
+            UserEvent::DecoderInt8(r) => match r {
+                Ok(()) => {
+                    eprintln!("downloaded the int8 decoder: switching to it");
+                    self.model_swap_pending = true; // when the user isn't recording
+                }
+                Err(e) => eprintln!("int8 decoder: {e} (keeping the fp32 one)"),
+            },
             UserEvent::Menu(_) => {}
             UserEvent::Settings(msg) => self.settings_message(&msg),
         }
+    }
+
+    /// Models downloaded before the int8 decoder existed get it in the background (27 MB);
+    /// the model is loaded again with it once the user isn't recording.
+    fn fetch_decoder_int8(&mut self) {
+        let dir = model::model_dir();
+        if self.decoder_int8_started || dir.join(model::DECODER_INT8).is_file() || model::is_fp32_only(&dir) {
+            return;
+        }
+        self.decoder_int8_started = true;
+        let p = self.proxy.clone();
+        std::thread::spawn(move || {
+            let r = model::download_decoder_int8(&dir).map_err(|e| format!("{e:#}"));
+            let _ = p.send_event(UserEvent::DecoderInt8(r));
+        });
     }
 
     /// Versions before 1.0.2 downloaded the full-precision model (2.6 GB of RAM). Offers once
@@ -1022,8 +1086,11 @@ impl App {
             return;
         }
         if self.model_swap_pending && self.cfg.backend == Backend::Local {
-            // Load the int8 model in place of the full-precision one.
+            // Load the model again with the new files (int8 encoder or decoder) in place.
             self.model_swap_pending = false;
+            if self.asleep {
+                return; // freed when idle: the next recording loads the new files anyway
+            }
             self.remove_fp32_after_load = true;
             self.asr = None;
             self.load_gen += 1;
@@ -1133,6 +1200,11 @@ impl App {
                     eprintln!("talk key held {} ms", held.as_millis());
                     if held < TAP {
                         self.handsfree = true;
+                        if self.cfg.live_typing
+                            && let Some(seg) = self.segmenter.as_mut()
+                        {
+                            seg.set_live(); // shorter parts, so text appears sooner
+                        }
                         self.status_text = format!("Listening… (tap {TALK_KEY_LABEL} to finish)");
                         self.overlay.set(Phase::Listening { handsfree: true });
                     } else {
@@ -1149,6 +1221,7 @@ impl App {
                         p.cancel();
                     }
                     self.rec_gen += 1;
+                    self.end_live(); // what was typed already stays
                     self.handsfree = false;
                     self.state = State::Idle;
                     self.status_text = "Cancelled".into();
@@ -1169,6 +1242,11 @@ impl App {
     /// Sets up the segmenter and the background transcription worker for a new recording.
     fn start_pipeline(&mut self) {
         self.rec_gen += 1;
+        self.end_live();
+        let (p, generation) = (self.proxy.clone(), self.rec_gen);
+        let on_part = move |t: &str| {
+            let _ = p.send_event(UserEvent::Part(generation, t.to_string()));
+        };
         self.reload_vocabulary();
         self.segmenter = Some(Segmenter::new(self.recorder.rate()));
         let mixed = self.cfg.mixed_english;
@@ -1193,12 +1271,13 @@ impl App {
                         Err(e) => Err(anyhow::anyhow!("loading the model: {e}")),
                     },
                     None,
+                    on_part,
                 )
             }
             Backend::Local => {
                 let asr = self.asr.clone().expect("model loaded in Idle state");
                 let vocabulary = self.vocabulary.clone();
-                Pipeline::start(move |a: &[f32]| asr.lock().unwrap().transcribe(a, mixed, &vocabulary), None)
+                Pipeline::start(move |a: &[f32]| asr.lock().unwrap().transcribe(a, mixed, &vocabulary), None, on_part)
             }
             Backend::Lambda => {
                 let stale = self.last_server_ok.is_none_or(|t| t.elapsed() > ASSUME_WARM);
@@ -1209,9 +1288,41 @@ impl App {
                 // time, so sending earlier would start a second, cold instance.
                 let server = self.cfg.server();
                 let vocabulary = self.vocabulary_header.clone();
-                Pipeline::start(move |a: &[f32]| server.transcribe(a, mixed, &vocabulary), self.warm.take())
+                Pipeline::start(move |a: &[f32]| server.transcribe(a, mixed, &vocabulary), self.warm.take(), on_part)
             }
         });
+    }
+
+    /// A part of the recording was transcribed: hands-free with `live_typing`, type it now
+    /// (into the window the first part went to) instead of waiting for the end.
+    fn type_part(&mut self, generation: u64, text: String) {
+        if generation != self.rec_gen {
+            return; // cancelled recording
+        }
+        self.parts_heard += 1;
+        let live = self.cfg.live_typing && self.handsfree && self.state == State::Recording;
+        if !live || self.typed.len() + 1 != self.parts_heard {
+            return; // left for the end, with every part after it (they must stay in order)
+        }
+        let window = platform::focused_window();
+        if self.typer.as_ref().is_some_and(|(_, w)| *w != window) || platform::foreground_is_elevated() {
+            eprintln!("the focused window changed: the rest waits for the end");
+            return;
+        }
+        let text = corrections::finish(&text, &self.corrections, self.cfg.numbers_as_digits);
+        let restore = self.cfg.restore_clipboard;
+        let (typer, _) = self.typer.get_or_insert_with(|| (inserter::LiveTyper::start(restore), window));
+        typer.type_text(continuation(&self.typed, &text));
+        self.typed.push(text);
+    }
+
+    /// Forgets this recording's live typing; the typer puts the clipboard back once done.
+    fn end_live(&mut self) {
+        self.parts_heard = 0;
+        self.typed.clear();
+        if let Some((typer, _)) = self.typer.take() {
+            typer.finish();
+        }
     }
 
     /// When the idle model is due to be freed (None: not applicable).
@@ -1290,6 +1401,7 @@ impl App {
         std::thread::spawn(move || {
             let out = worker.join().unwrap_or_else(|_| Outcome {
                 text: String::new(),
+                parts: Vec::new(),
                 segments: 0,
                 audio_s: 0.0,
                 errors: vec!["transcription worker crashed".into()],
@@ -1384,6 +1496,7 @@ impl App {
             "digits": self.cfg.numbers_as_digits,
             "restore": self.cfg.restore_clipboard,
             "unload": self.cfg.unload_when_idle,
+            "live": self.cfg.live_typing,
             "autostart": self.cfg.start_at_login,
             "vocabCount": self.vocab_count,
             "correctionsCount": self.corrections_count,
@@ -1428,6 +1541,7 @@ impl App {
                 match v["key"].as_str().unwrap_or("") {
                     "mixed" => self.cfg.mixed_english = on,
                     "digits" => self.cfg.numbers_as_digits = on,
+                    "live" => self.cfg.live_typing = on,
                     "restore" => self.cfg.restore_clipboard = on,
                     "unload" => {
                         self.cfg.unload_when_idle = on;
@@ -1587,6 +1701,12 @@ fn edit_menu() -> Menu {
 }
 
 /// A message box that doesn't block the event loop.
+/// `next` as typed after the parts already typed: with the space `join_parts` would put there.
+fn continuation(typed: &[String], next: &str) -> String {
+    let after_text = typed.iter().any(|t| !t.is_empty());
+    if after_text && !next.is_empty() && !crate::asr::starts_with_particle(next) { format!(" {next}") } else { next.to_string() }
+}
+
 fn show_alert(message: String) {
     std::thread::spawn(move || platform::alert(&message));
 }

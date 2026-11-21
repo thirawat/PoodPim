@@ -32,6 +32,9 @@ pub struct Config {
     /// Free the local model's memory (~0.75 GB) after a while without dictation; it loads
     /// again, while the user speaks, on the next press of the talk key.
     pub unload_when_idle: bool,
+    /// Hands-free mode (tap the talk key): type each part as soon as it is transcribed, while
+    /// the user is still speaking, instead of all of it at the end.
+    pub live_typing: bool,
     /// Said "later" to replacing the old full-precision model with the smaller int8 one.
     pub model_upgrade_declined: bool,
 }
@@ -47,6 +50,7 @@ impl Default for Config {
             start_at_login: true,
             numbers_as_digits: true,
             unload_when_idle: false,
+            live_typing: true,
             model_upgrade_declined: false,
         }
     }
