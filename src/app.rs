@@ -848,11 +848,12 @@ impl App {
                 let rest = if rest.is_empty() { rest } else { corrections::finish(&rest, &self.corrections, self.cfg.numbers_as_digits) };
                 let text = crate::pipeline::join_parts(&typed.iter().chain([&rest]).collect::<Vec<_>>());
                 if !text.is_empty() {
-                    eprintln!("{:.1}s in {} segment(s), {} typed live: {}", out.audio_s, out.segments, typed.len(), said(&text));
-                    if self.secure_seen || platform::secure_input() {
-                        // Likely a password: pasted, but not kept for the menu.
+                    let secure = self.secure_seen || platform::secure_input();
+                    let shown = if secure { "(Secure Input: text not logged)" } else { said(&text) };
+                    eprintln!("{:.1}s in {} segment(s), {} typed live: {}", out.audio_s, out.segments, typed.len(), shown);
+                    if secure {
+                        // Likely a password: pasted, but not kept for the menu (nor shown while heard).
                         eprintln!("Secure Input is on: not kept in Recent");
-                        self.last_text.clear();
                     } else {
                         self.last_text = text.clone();
                         self.recent.push_front(text.clone());
@@ -1224,13 +1225,16 @@ impl App {
                 if self.state == State::Recording && self.stop_at.is_some() {
                     // Pressed again within TAIL of letting go: carry on with the same recording.
                     self.stop_at = None;
+                    (self.key_up_seen, self.key_down_seen) = (0, platform::talk_key_down() == Some(true));
                 } else if self.state == State::Recording && self.handsfree {
                     self.handsfree = false;
                     self.finish();
                 } else if self.state == State::Idle {
                     let started = Instant::now();
-                    // Before opening the microphone, which can take a second: an Esc meanwhile cancels.
+                    // Before opening the microphone, which can take a second: an Esc meanwhile cancels,
+                    // and the key may be let go meanwhile (`check_talk_key`).
                     platform::set_listening(true);
+                    self.key_down_seen = platform::talk_key_down() == Some(true);
                     match self.recorder.start() {
                         Ok(()) => {
                             // From the key press, not from now: opening the microphone can take
@@ -1240,7 +1244,7 @@ impl App {
                             eprintln!("microphone started in {} ms", started.elapsed().as_millis());
                             self.state = State::Recording;
                             (self.mic_len, self.mic_seen, self.mic_lost) = (0, Instant::now(), false);
-                            (self.key_up_seen, self.key_down_seen) = (0, false);
+                            self.key_up_seen = 0;
                             self.secure_seen = platform::secure_input();
                             self.status_text = "Listening…".into();
                             eprintln!("listening");
@@ -1249,7 +1253,6 @@ impl App {
                         }
                         Err(e) => {
                             platform::set_listening(false);
-                            platform::escape_handled(); // nothing to cancel
                             eprintln!("microphone: {e:#}");
                             self.status_text = format!("Microphone error: {e}");
                             self.overlay.set(Phase::Failed);
@@ -1276,9 +1279,8 @@ impl App {
                 }
             }
             HotkeyEvent::Escape => {
-                platform::escape_handled();
+                platform::set_listening(false); // (the hook took this Esc: it cancels)
                 if self.state == State::Recording {
-                    platform::set_listening(false);
                     self.stop_at = None;
                     self.recorder.stop_raw();
                     self.segmenter = None;
@@ -1556,10 +1558,9 @@ impl App {
     }
 
     fn finish(&mut self) {
-        if platform::escape_pending() {
+        if !platform::stop_listening() {
             return; // an Esc was taken from the keyboard and its event comes next: it cancels
         }
-        platform::set_listening(false);
         self.stop_at = None;
         let raw = self.recorder.stop_raw();
         let rate = self.recorder.rate();

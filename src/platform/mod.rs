@@ -20,39 +20,45 @@ pub const KEY_KEEP_PROMPT: &str = "ใส่ API key\n(เว้นว่าง�
 
 pub type HotkeySink = Box<dyn Fn(HotkeyEvent) + Send + Sync + 'static>;
 
-/// Whether dictation is listening. Only then does Esc cancel it, and the keyboard hook keeps
-/// that Esc from the focused app (where it would close a dialog or stop a program running in
-/// a terminal, as users of other dictation apps reported).
-static LISTENING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether dictation listens, as one atomic state shared with the keyboard hook: only while it
+/// does, Esc cancels dictation and the hook keeps that Esc from the focused app (where it would
+/// close a dialog or stop a program running in a terminal, as users of other dictation apps
+/// reported). The hook and `stop_listening` (on finishing) race for it: exactly one wins, so an Esc
+/// that was taken from the keyboard always cancels and is never followed by a paste.
+static LISTEN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(OFF);
+const OFF: u8 = 0;
+const ON: u8 = 1;
+/// The hook took an Esc; its Escape event is on its way and will cancel.
+const CANCELLING: u8 = 2;
 
-/// Set by the keyboard hook when it takes an Esc, until the app handles that Escape event: a
-/// recording must not be finished (and pasted) in between, as a swallowed Esc means "cancel".
-static ESCAPE_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
+/// Dictation starts (true) or stops listening, also once its Escape event cancelled it (false).
 pub fn set_listening(on: bool) {
-    LISTENING.store(on, std::sync::atomic::Ordering::SeqCst);
+    LISTEN.store(if on { ON } else { OFF }, std::sync::atomic::Ordering::SeqCst);
     #[cfg(target_os = "macos")]
     macos::capture_escape();
 }
 
+/// Finishing dictation: stops listening, unless the hook took an Esc first (false: its Escape
+/// event comes next and cancels, so don't transcribe or paste).
+pub fn stop_listening() -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    let won = LISTEN.compare_exchange(ON, OFF, SeqCst, SeqCst).map_or_else(|now| now != CANCELLING, |_| true);
+    #[cfg(target_os = "macos")]
+    macos::capture_escape();
+    won
+}
+
+/// For the hook: whether this Esc cancels dictation (then it's the hook's, to keep from the app).
 #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
-fn escape_taken() {
-    ESCAPE_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+fn take_escape() -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    LISTEN.compare_exchange(ON, CANCELLING, SeqCst, SeqCst).is_ok()
 }
 
-/// Whether an Esc was taken from the keyboard but its Escape event is still on its way.
-pub fn escape_pending() -> bool {
-    ESCAPE_PENDING.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-/// The Escape event arrived.
-pub fn escape_handled() {
-    ESCAPE_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
-}
-
-#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+/// Listening or cancelling (macOS: the Esc tap stays on until it is off).
+#[cfg(target_os = "macos")]
 fn listening() -> bool {
-    LISTENING.load(std::sync::atomic::Ordering::SeqCst)
+    LISTEN.load(std::sync::atomic::Ordering::SeqCst) != OFF
 }
 
 #[cfg(target_os = "macos")]

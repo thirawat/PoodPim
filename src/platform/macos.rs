@@ -88,7 +88,7 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                             CGEventType::KeyDown
                                 if ESC_TAP.load(Ordering::SeqCst) == 0
                                     && event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) == KEY_ESC
-                                    && super::listening() =>
+                                    && super::take_escape() =>
                             {
                                 s(HotkeyEvent::Escape)
                             }
@@ -115,23 +115,23 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                     CGEventTapOptions::Default,
                     vec![CGEventType::KeyDown, CGEventType::KeyUp],
                     move |_proxy, etype, event| {
-                        let esc = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) == KEY_ESC;
+                        // (Read fields only of key events: a "tap disabled" one may have no event.)
+                        let key = || event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
                         match etype {
                             // Back on at once if it should be (also when dictation started meanwhile).
                             CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
                                 capture_escape();
                                 CallbackResult::Keep
                             }
-                            CGEventType::KeyDown if esc => {
+                            CGEventType::KeyDown if key() == KEY_ESC => {
                                 let repeat = event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT) != 0;
                                 if repeat && ESC_HELD.load(Ordering::SeqCst) {
                                     return CallbackResult::Drop; // the press that cancelled, still held
                                 }
                                 // A new press (an earlier release may have been missed), or a repeat of
                                 // one that began before dictation: only a new press while listening cancels.
-                                if !repeat && super::listening() {
+                                if !repeat && super::take_escape() {
                                     ESC_HELD.store(true, Ordering::SeqCst);
-                                    super::escape_taken();
                                     s(HotkeyEvent::Escape);
                                     return CallbackResult::Drop; // cancels dictation only
                                 }
@@ -139,9 +139,22 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                                 capture_escape();
                                 CallbackResult::Keep
                             }
-                            CGEventType::KeyUp if esc && ESC_HELD.swap(false, Ordering::SeqCst) => {
-                                capture_escape(); // off now if dictation is over
-                                CallbackResult::Drop
+                            CGEventType::KeyUp if key() == KEY_ESC => {
+                                if ESC_HELD.swap(false, Ordering::SeqCst) {
+                                    capture_escape(); // off now if dictation is over
+                                    return CallbackResult::Drop;
+                                }
+                                CallbackResult::Keep
+                            }
+                            // Another key while the cancelling Esc counts as held although dictation is
+                            // over: if Esc is up, its release was missed (e.g. the screen locked).
+                            _ if ESC_HELD.load(Ordering::SeqCst)
+                                && !super::listening()
+                                && !unsafe { CGEventSourceKeyState(HID_SYSTEM_STATE, KEY_ESC as u16) } =>
+                            {
+                                ESC_HELD.store(false, Ordering::SeqCst);
+                                capture_escape();
+                                CallbackResult::Keep
                             }
                             _ => CallbackResult::Keep,
                         }
@@ -202,13 +215,16 @@ pub fn focused_window() -> u64 {
 
 unsafe extern "C" {
     fn CGEventSourceFlagsState(state: i32) -> u64;
+    fn CGEventSourceKeyState(state: i32, key: u16) -> bool;
 }
+
+/// kCGEventSourceStateHIDSystemState: the keyboard's own state, not what apps were told.
+const HID_SYSTEM_STATE: i32 = 1;
 
 /// Whether Right Option is down now, asked of the keyboard itself rather than told by the
 /// event tap: the tap can miss the release (Secure Input in a password field, the screen
 /// locking), which left dictation recording until the key was pressed again.
 pub fn talk_key_down() -> Option<bool> {
-    const HID_SYSTEM_STATE: i32 = 1;
     Some(unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) } & NX_DEVICERALTKEYMASK != 0)
 }
 

@@ -258,9 +258,10 @@ Windows: `package-windows.sh` cross-compiles from macOS with
 MSVC/SDK libraries are cached in `target/xwin-cache`), or build on Windows with the MSVC
 toolchain (`cargo build --release`). The zip ships `DirectML.dll` next to the exe (the prebuilt
 ONNX Runtime for Windows always links it) and needs the Visual C++ runtime on the PC
-(install.ps1 installs Microsoft's `vc_redist.x64.exe`, after checking its signature, unless the
-x64 runtime is registered or, on x64 Windows, `msvcp140.dll`, `vcruntime140.dll` and
-`vcruntime140_1.dll` are in System32; it doesn't start the app while the runtime is missing).
+(install.ps1 installs Microsoft's `vc_redist.x64.exe`, after checking its signature, unless
+`msvcp140.dll`, `vcruntime140.dll` and `vcruntime140_1.dll` are in System32 (on ARM64: the x64
+runtime is registered) or PoodPim was running before the update; it doesn't start the app while
+the runtime is missing).
 
 On Windows, PoodPim takes Right Alt for itself: other apps never see it, because an Alt
 pressed and released on its own opens the focused app's menu (Office KeyTips). Left Alt is
