@@ -27,10 +27,18 @@ unsafe extern "C" {
     fn CGEventTapEnable(tap: *const std::ffi::c_void, enable: bool);
 }
 
-/// Turns the Esc tap on while dictation listens and off otherwise (see `super::set_listening`).
-pub(super) fn capture_escape(on: bool) {
+/// The Esc press that cancelled dictation is still held: its repeats and release are dropped too.
+static ESC_HELD: AtomicBool = AtomicBool::new(false);
+static ESC_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Turns the Esc tap on while dictation listens (or its cancelling Esc is held) and off
+/// otherwise. Reads that state under a lock, so that the main thread (`super::set_listening`)
+/// and the tap thread (re-enabling after a timeout) can't apply an outdated one last.
+pub(super) fn capture_escape() {
+    let _switch = ESC_SWITCH.lock().unwrap_or_else(|e| e.into_inner());
     let tap = ESC_TAP.load(Ordering::SeqCst);
     if tap != 0 {
+        let on = super::listening() || ESC_HELD.load(Ordering::SeqCst);
         unsafe { CGEventTapEnable(tap as *const std::ffi::c_void, on) };
     }
 }
@@ -58,31 +66,6 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                     std::thread::sleep(Duration::from_secs(1));
                     continue;
                 }
-                let esc_disabled = Arc::new(AtomicBool::new(false));
-                let (s, d) = (sink.clone(), esc_disabled.clone());
-                let esc_tap = CGEventTap::new(
-                    CGEventTapLocation::Session,
-                    CGEventTapPlacement::HeadInsertEventTap,
-                    CGEventTapOptions::Default,
-                    vec![CGEventType::KeyDown],
-                    move |_proxy, etype, event| match etype {
-                        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
-                            d.store(true, Ordering::SeqCst);
-                            CallbackResult::Keep
-                        }
-                        CGEventType::KeyDown
-                            if event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) == KEY_ESC
-                                && super::listening() =>
-                        {
-                            s(HotkeyEvent::Escape);
-                            CallbackResult::Drop // cancels dictation only
-                        }
-                        _ => CallbackResult::Keep,
-                    },
-                )
-                .inspect_err(|_| eprintln!("no Esc tap: Esc reaches the focused app too"))
-                .ok();
-                let has_esc_tap = esc_tap.is_some();
                 let disabled = Arc::new(AtomicBool::new(false));
                 let (s, d) = (sink.clone(), disabled.clone());
                 let tap = CGEventTap::new(
@@ -101,8 +84,9 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                                     s(if down { HotkeyEvent::TalkDown } else { HotkeyEvent::TalkUp });
                                 }
                             }
+                            // Without the Esc tap (not made, or not yet), Esc is reported from here.
                             CGEventType::KeyDown
-                                if !has_esc_tap
+                                if ESC_TAP.load(Ordering::SeqCst) == 0
                                     && event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) == KEY_ESC
                                     && super::listening() =>
                             {
@@ -124,21 +108,61 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                 let source = tap.mach_port().create_runloop_source(0).expect("runloop source");
                 CFRunLoop::get_current().add_source(&source, unsafe { kCFRunLoopCommonModes });
                 tap.enable();
+                let s = sink.clone();
+                let esc_tap = CGEventTap::new(
+                    CGEventTapLocation::Session,
+                    CGEventTapPlacement::HeadInsertEventTap,
+                    CGEventTapOptions::Default,
+                    vec![CGEventType::KeyDown, CGEventType::KeyUp],
+                    move |_proxy, etype, event| {
+                        let esc = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) == KEY_ESC;
+                        match etype {
+                            // Back on at once if it should be (also when dictation started meanwhile).
+                            CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
+                                capture_escape();
+                                CallbackResult::Keep
+                            }
+                            CGEventType::KeyDown if esc => {
+                                let repeat = event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT) != 0;
+                                if repeat && ESC_HELD.load(Ordering::SeqCst) {
+                                    return CallbackResult::Drop; // the press that cancelled, still held
+                                }
+                                // A new press (an earlier release may have been missed), or a repeat of
+                                // one that began before dictation: only a new press while listening cancels.
+                                if !repeat && super::listening() {
+                                    ESC_HELD.store(true, Ordering::SeqCst);
+                                    super::escape_taken();
+                                    s(HotkeyEvent::Escape);
+                                    return CallbackResult::Drop; // cancels dictation only
+                                }
+                                ESC_HELD.store(false, Ordering::SeqCst);
+                                capture_escape();
+                                CallbackResult::Keep
+                            }
+                            CGEventType::KeyUp if esc && ESC_HELD.swap(false, Ordering::SeqCst) => {
+                                capture_escape(); // off now if dictation is over
+                                CallbackResult::Drop
+                            }
+                            _ => CallbackResult::Keep,
+                        }
+                    },
+                )
+                .inspect_err(|_| eprintln!("no Esc tap: Esc reaches the focused app too"))
+                .ok();
                 if let Some(esc) = &esc_tap {
+                    // A new tap is on: off until dictation listens, as it stands in every key's way.
+                    unsafe { CGEventTapEnable(esc.mach_port().as_concrete_TypeRef() as *const std::ffi::c_void, false) };
                     let source = esc.mach_port().create_runloop_source(0).expect("runloop source");
                     CFRunLoop::get_current().add_source(&source, unsafe { kCFRunLoopCommonModes });
-                    // Off until dictation listens (the tap and this thread live as long as the app).
+                    // (The tap and this thread live as long as the app.)
                     ESC_TAP.store(esc.mach_port().as_concrete_TypeRef() as usize, Ordering::SeqCst);
-                    capture_escape(super::listening());
+                    capture_escape();
                 }
                 sink(HotkeyEvent::Ready);
                 loop {
                     CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, Duration::from_secs(1), false);
                     if disabled.swap(false, Ordering::SeqCst) {
                         tap.enable();
-                    }
-                    if esc_disabled.swap(false, Ordering::SeqCst) {
-                        capture_escape(super::listening());
                     }
                 }
             }

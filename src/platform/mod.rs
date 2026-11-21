@@ -25,10 +25,29 @@ pub type HotkeySink = Box<dyn Fn(HotkeyEvent) + Send + Sync + 'static>;
 /// a terminal, as users of other dictation apps reported).
 static LISTENING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Set by the keyboard hook when it takes an Esc, until the app handles that Escape event: a
+/// recording must not be finished (and pasted) in between, as a swallowed Esc means "cancel".
+static ESCAPE_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn set_listening(on: bool) {
     LISTENING.store(on, std::sync::atomic::Ordering::SeqCst);
     #[cfg(target_os = "macos")]
-    macos::capture_escape(on);
+    macos::capture_escape();
+}
+
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+fn escape_taken() {
+    ESCAPE_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether an Esc was taken from the keyboard but its Escape event is still on its way.
+pub fn escape_pending() -> bool {
+    ESCAPE_PENDING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The Escape event arrived.
+pub fn escape_handled() {
+    ESCAPE_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
 #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]

@@ -108,13 +108,26 @@ try {
     foreach ($k in 'NoModify', 'NoRepair') { Set-ItemProperty -Path $Key -Name $k -Value 1 -Type DWord }
     Set-ItemProperty -Path $Key -Name EstimatedSize -Value $SizeKb -Type DWord
 
-    # PoodPim.exe needs the Visual C++ Runtime (msvcp140.dll...), present on most PCs; without it
-    # Windows only says "MSVCP140.dll was not found". Installing it needs administrator rights
-    # (Windows asks); if the user says no, PoodPim is installed anyway and this says where to get it.
+    # PoodPim.exe (x64) needs the x64 Visual C++ Runtime (msvcp140.dll...), present on most PCs;
+    # without it Windows only says "MSVCP140.dll was not found". Installing it needs administrator
+    # rights (Windows asks); if that fails, PoodPim stays installed and this says where to get it.
     $VcUrl = 'https://aka.ms/vs/17/release/vc_redist.x64.exe'
-    $VcMissing = @('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll' |
-        Where-Object { -not (Test-Path (Join-Path $env:windir "System32\$_")) })
-    if ($VcMissing.Count -gt 0) {
+    $Reg64 = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', 'Registry64')
+    # The real CPU, also from a 32-bit or x64-emulated PowerShell.
+    $Arch = $Reg64.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment').GetValue('PROCESSOR_ARCHITECTURE')
+    function Test-VcRuntime {
+        # Registered by the x64 redistributable (on ARM64 too, where x64 apps are emulated).
+        $Key = $Reg64.OpenSubKey('SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64')
+        if ($Key -and $Key.GetValue('Installed') -eq 1) { return $true }
+        # Or the DLLs, put there by something else. Not on ARM64, where they are ARM64 ones; a
+        # 32-bit PowerShell sees SysWOW64 as System32, so look through Sysnative.
+        if ($Arch -eq 'ARM64') { return $false }
+        $Sys = if ([Environment]::Is64BitProcess) { 'System32' } else { 'Sysnative' }
+        return -not ('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll' |
+            Where-Object { -not (Test-Path (Join-Path $env:windir "$Sys\$_")) })
+    }
+    $VcReady = Test-VcRuntime
+    if (-not $VcReady) {
         Write-Host 'PoodPim needs the Microsoft Visual C++ Runtime, which this PC does not have yet.'
         Write-Host 'Installing it now: click Yes when Windows asks for permission.'
         try {
@@ -125,8 +138,12 @@ try {
                 throw 'the download is not signed by Microsoft'
             }
             $P = Start-Process -FilePath $Vc -ArgumentList '/install', '/quiet', '/norestart' -Verb RunAs -Wait -PassThru
-            # 3010: installed, restart pending; 1638: a newer version is already there.
+            # 3010: installed, Windows wants a restart; 1638: another version is already there,
+            # which the check below decides about.
             if (@(0, 3010, 1638) -notcontains $P.ExitCode) { throw "its installer exited with code $($P.ExitCode)" }
+            $VcReady = Test-VcRuntime
+            if (-not $VcReady) { throw 'it is still missing after its installer ran' }
+            if ($P.ExitCode -eq 3010) { Write-Host 'Installed it. If PoodPim does not start, restart Windows.' }
         }
         catch {
             Write-Host "Could not install the Visual C++ Runtime ($($_.Exception.Message))." -ForegroundColor Yellow
@@ -134,9 +151,9 @@ try {
         }
     }
 
-    Start-Process -FilePath $Exe -WorkingDirectory $Dir
+    if ($VcReady) { Start-Process -FilePath $Exe -WorkingDirectory $Dir }
     Write-Host "PoodPim $Version is installed in $Dir"
-    Write-Host 'Look for the microphone icon next to the clock, then hold Right Alt to talk.'
+    if ($VcReady) { Write-Host 'Look for the microphone icon next to the clock, then hold Right Alt to talk.' }
 }
 finally {
     Remove-Item -Recurse -Force $Tmp, $Stage -ErrorAction SilentlyContinue

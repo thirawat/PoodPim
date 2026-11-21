@@ -192,6 +192,9 @@ struct App {
     /// Checks in a row (POLL apart) that found the talk key up while the app thought it held
     /// (`check_talk_key`).
     key_up_seen: u32,
+    /// The check found the talk key down during this hold: until then it doesn't act, as a key
+    /// that macOS doesn't see as held (one sent by a remapping app or remote control) never is.
+    key_down_seen: bool,
     typer: Option<(inserter::LiveTyper, u64)>,
     last_server_ok: Option<Instant>,
     dialog_open: bool,
@@ -337,6 +340,7 @@ pub fn run() -> Result<()> {
         mic_seen: Instant::now(),
         mic_lost: false,
         key_up_seen: 0,
+        key_down_seen: false,
         typer: None,
         last_server_ok: None,
         dialog_open: false,
@@ -1215,6 +1219,8 @@ impl App {
                     self.finish();
                 } else if self.state == State::Idle {
                     let started = Instant::now();
+                    // Before opening the microphone, which can take a second: an Esc meanwhile cancels.
+                    platform::set_listening(true);
                     match self.recorder.start() {
                         Ok(()) => {
                             // From the key press, not from now: opening the microphone can take
@@ -1223,14 +1229,16 @@ impl App {
                             self.pressed_at = at;
                             eprintln!("microphone started in {} ms", started.elapsed().as_millis());
                             self.state = State::Recording;
-                            platform::set_listening(true);
-                            (self.mic_len, self.mic_seen, self.mic_lost, self.key_up_seen) = (0, Instant::now(), false, 0);
+                            (self.mic_len, self.mic_seen, self.mic_lost) = (0, Instant::now(), false);
+                            (self.key_up_seen, self.key_down_seen) = (0, false);
                             self.status_text = "Listening…".into();
                             eprintln!("listening");
                             self.overlay.set(Phase::Listening { handsfree: false });
                             self.start_pipeline();
                         }
                         Err(e) => {
+                            platform::set_listening(false);
+                            platform::escape_handled(); // nothing to cancel
                             eprintln!("microphone: {e:#}");
                             self.status_text = format!("Microphone error: {e}");
                             self.overlay.set(Phase::Failed);
@@ -1257,6 +1265,7 @@ impl App {
                 }
             }
             HotkeyEvent::Escape => {
+                platform::escape_handled();
                 if self.state == State::Recording {
                     platform::set_listening(false);
                     self.stop_at = None;
@@ -1269,6 +1278,7 @@ impl App {
                     self.end_live(); // what was typed already stays
                     self.handsfree = false;
                     self.state = State::Idle;
+                    eprintln!("cancelled with Esc");
                     self.status_text = "Cancelled".into();
                     self.overlay.set(Phase::Cancelled);
                 }
@@ -1392,7 +1402,9 @@ impl App {
     /// misses it under Secure Input, e.g. in a password field), let go of it now.
     fn check_talk_key(&mut self) {
         let holding = self.state == State::Recording && !self.handsfree && self.stop_at.is_none();
-        if !holding || self.pressed_at.elapsed() < Duration::from_millis(600) || platform::talk_key_down() != Some(false) {
+        let down = if holding { platform::talk_key_down() } else { None };
+        self.key_down_seen |= down == Some(true);
+        if down != Some(false) || !self.key_down_seen || self.pressed_at.elapsed() < Duration::from_millis(600) {
             self.key_up_seen = 0;
             return;
         }
@@ -1528,6 +1540,9 @@ impl App {
     }
 
     fn finish(&mut self) {
+        if platform::escape_pending() {
+            return; // an Esc was taken from the keyboard and its event comes next: it cancels
+        }
         platform::set_listening(false);
         self.stop_at = None;
         let raw = self.recorder.stop_raw();

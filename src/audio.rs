@@ -132,9 +132,13 @@ where
                 b.push(s);
             }
         },
-        move |e| {
+        move |e: cpal::Error| {
             eprintln!("audio stream error: {e}");
-            error.lock().unwrap().get_or_insert_with(|| e.to_string());
+            // Only a stream that is gone ends the recording: an Xrun (the CPU was late once,
+            // e.g. while a part is transcribed) or a DeviceChanged (rerouted, still running) don't.
+            if matches!(e.kind(), cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::StreamInvalidated) {
+                error.lock().unwrap().get_or_insert_with(|| e.to_string());
+            }
         },
         None,
     )?;

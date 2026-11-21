@@ -70,10 +70,13 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                 return LRESULT(1);
             }
             if kb.vkCode == VK_ESCAPE.0 as u32 {
-                // While listening, Esc cancels dictation and no app sees it (its release too).
-                if is_down && super::listening() {
-                    ESC_TAKEN.store(true, Ordering::SeqCst);
-                    sink(HotkeyEvent::Escape);
+                // While listening, Esc cancels dictation and no app sees that press: neither its
+                // auto-repeats (also once listening has ended) nor its release.
+                if is_down && (super::listening() || ESC_TAKEN.load(Ordering::SeqCst)) {
+                    if !ESC_TAKEN.swap(true, Ordering::SeqCst) {
+                        super::escape_taken();
+                        sink(HotkeyEvent::Escape);
+                    }
                     return LRESULT(1);
                 }
                 if is_up && ESC_TAKEN.swap(false, Ordering::SeqCst) {
