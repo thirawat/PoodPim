@@ -69,8 +69,32 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
             if kb.vkCode == VK_LCONTROL.0 as u32 && kb.scanCode == ALTGR_FAKE_CTRL_SCAN {
                 return LRESULT(1);
             }
-            if kb.vkCode == VK_ESCAPE.0 as u32 && is_down {
-                sink(HotkeyEvent::Escape);
+            if kb.vkCode == VK_ESCAPE.0 as u32 {
+                // The hook isn't told which downs are auto-repeats: a down while Esc is down (seen
+                // within a second, the longest repeat delay) is one; else it is a new press, also
+                // when an earlier release never came (the screen locked, a UAC prompt).
+                if is_down {
+                    let last = ESC_DOWN_AT.swap(kb.time, Ordering::SeqCst);
+                    let repeat = ESC_DOWN.swap(true, Ordering::SeqCst) && kb.time.wrapping_sub(last) < 1100;
+                    if repeat {
+                        // The press that cancelled dictation: its repeats go too.
+                        if ESC_TAKEN.load(Ordering::SeqCst) {
+                            return LRESULT(1);
+                        }
+                    } else if super::take_escape() {
+                        // While listening, Esc cancels dictation and no app sees that press.
+                        ESC_TAKEN.store(true, Ordering::SeqCst);
+                        sink(HotkeyEvent::Escape);
+                        return LRESULT(1);
+                    } else {
+                        ESC_TAKEN.store(false, Ordering::SeqCst);
+                    }
+                } else if is_up {
+                    ESC_DOWN.store(false, Ordering::SeqCst);
+                    if ESC_TAKEN.swap(false, Ordering::SeqCst) {
+                        return LRESULT(1);
+                    }
+                }
             }
         }
     }
@@ -98,6 +122,19 @@ fn send_keys(keys: &[(VIRTUAL_KEY, bool)]) {
     }
 }
 
+/// The Esc press being held was taken out by the hook (it cancelled dictation): its repeats and
+/// release go too.
+static ESC_TAKEN: AtomicBool = AtomicBool::new(false);
+/// Esc is down (its release not seen yet), since `ESC_DOWN_AT` (the hook's ms clock).
+static ESC_DOWN: AtomicBool = AtomicBool::new(false);
+static ESC_DOWN_AT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The hook swallows Right Alt, so Windows' own key state doesn't know it is down: there is
+/// nothing to check against (unlike macOS).
+pub fn talk_key_down() -> Option<bool> {
+    None
+}
+
 pub fn send_paste() {
     send_keys(&[(VK_CONTROL, true), (VK_V, true), (VK_V, false), (VK_CONTROL, false)]);
 }
@@ -105,6 +142,11 @@ pub fn send_paste() {
 /// The window in front, to tell whether the user switched windows while text was being typed.
 pub fn focused_window() -> u64 {
     unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize as u64 }
+}
+
+/// macOS only (Secure Input); Windows has no system-wide equivalent.
+pub fn secure_input() -> bool {
+    false
 }
 
 /// Whether the focused window belongs to an app run as administrator. Windows silently drops

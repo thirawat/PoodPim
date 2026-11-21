@@ -26,11 +26,13 @@ pub struct Recorder {
     stream: Option<cpal::Stream>,
     buf: Arc<Mutex<Vec<f32>>>,
     rate: u32,
+    /// The stream reported an error (the device went away…) since `start`.
+    error: Arc<Mutex<Option<String>>>,
 }
 
 impl Recorder {
     pub fn new() -> Self {
-        Self { stream: None, buf: Arc::new(Mutex::new(Vec::new())), rate: SAMPLE_RATE }
+        Self { stream: None, buf: Arc::new(Mutex::new(Vec::new())), rate: SAMPLE_RATE, error: Default::default() }
     }
 
     pub fn start(&mut self) -> Result<()> {
@@ -40,12 +42,14 @@ impl Recorder {
         let config = supported.config();
         self.rate = config.sample_rate;
         self.buf.lock().unwrap().clear();
+        *self.error.lock().unwrap() = None;
         let ch = config.channels as usize;
+        let (buf, err) = (self.buf.clone(), self.error.clone());
         let stream = match supported.sample_format() {
-            cpal::SampleFormat::F32 => build::<f32>(&device, config, ch, self.buf.clone())?,
-            cpal::SampleFormat::I16 => build::<i16>(&device, config, ch, self.buf.clone())?,
-            cpal::SampleFormat::I32 => build::<i32>(&device, config, ch, self.buf.clone())?,
-            cpal::SampleFormat::U16 => build::<u16>(&device, config, ch, self.buf.clone())?,
+            cpal::SampleFormat::F32 => build::<f32>(&device, config, ch, buf, err)?,
+            cpal::SampleFormat::I16 => build::<i16>(&device, config, ch, buf, err)?,
+            cpal::SampleFormat::I32 => build::<i32>(&device, config, ch, buf, err)?,
+            cpal::SampleFormat::U16 => build::<u16>(&device, config, ch, buf, err)?,
             f => return Err(anyhow!("unsupported microphone sample format {f:?}")),
         };
         stream.play()?;
@@ -63,10 +67,10 @@ impl Recorder {
                 let device = cpal::default_host().default_input_device().ok_or_else(|| anyhow!("no microphone found"))?;
                 let supported = device.default_input_config().context("microphone config")?;
                 let stream = match supported.sample_format() {
-                    cpal::SampleFormat::F32 => build::<f32>(&device, supported.config(), 1, Arc::new(Mutex::new(Vec::new())))?,
-                    cpal::SampleFormat::I16 => build::<i16>(&device, supported.config(), 1, Arc::new(Mutex::new(Vec::new())))?,
-                    cpal::SampleFormat::I32 => build::<i32>(&device, supported.config(), 1, Arc::new(Mutex::new(Vec::new())))?,
-                    cpal::SampleFormat::U16 => build::<u16>(&device, supported.config(), 1, Arc::new(Mutex::new(Vec::new())))?,
+                    cpal::SampleFormat::F32 => build::<f32>(&device, supported.config(), 1, Arc::new(Mutex::new(Vec::new())), Default::default())?,
+                    cpal::SampleFormat::I16 => build::<i16>(&device, supported.config(), 1, Arc::new(Mutex::new(Vec::new())), Default::default())?,
+                    cpal::SampleFormat::I32 => build::<i32>(&device, supported.config(), 1, Arc::new(Mutex::new(Vec::new())), Default::default())?,
+                    cpal::SampleFormat::U16 => build::<u16>(&device, supported.config(), 1, Arc::new(Mutex::new(Vec::new())), Default::default())?,
                     f => return Err(anyhow!("unsupported microphone sample format {f:?}")),
                 };
                 stream.play()?;
@@ -78,6 +82,11 @@ impl Recorder {
                 Err(e) => eprintln!("microphone warm-up: {e:#}"),
             }
         });
+    }
+
+    /// What the stream reported going wrong since `start`, if anything.
+    pub fn error(&self) -> Option<String> {
+        self.error.lock().unwrap().clone()
     }
 
     /// The microphone's sample rate (the buffer is mono at this rate).
@@ -103,7 +112,13 @@ impl Recorder {
     }
 }
 
-fn build<T>(device: &cpal::Device, config: cpal::StreamConfig, ch: usize, buf: Arc<Mutex<Vec<f32>>>) -> Result<cpal::Stream>
+fn build<T>(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    ch: usize,
+    buf: Arc<Mutex<Vec<f32>>>,
+    error: Arc<Mutex<Option<String>>>,
+) -> Result<cpal::Stream>
 where
     T: SizedSample,
     f32: FromSample<T>,
@@ -117,7 +132,14 @@ where
                 b.push(s);
             }
         },
-        |e| eprintln!("audio stream error: {e}"),
+        move |e: cpal::Error| {
+            eprintln!("audio stream error: {e}");
+            // Only a stream that is gone ends the recording: an Xrun (the CPU was late once,
+            // e.g. while a part is transcribed) or a DeviceChanged (rerouted, still running) don't.
+            if matches!(e.kind(), cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::StreamInvalidated) {
+                error.lock().unwrap().get_or_insert_with(|| e.to_string());
+            }
+        },
         None,
     )?;
     Ok(stream)
