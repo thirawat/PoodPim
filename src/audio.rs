@@ -175,6 +175,16 @@ pub fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
     out
 }
 
+/// Whether any 20 ms frame of `audio` (at `rate`) is louder than -45 dBFS, the level below
+/// which `trim_silence` treats it as silence.
+pub fn has_sound(audio: &[f32], rate: u32) -> bool {
+    let frame = (rate as usize / 50).max(1);
+    audio.chunks_exact(frame).any(|s| {
+        let rms = (s.iter().map(|v| v * v).sum::<f32>() / frame as f32 + 1e-12).sqrt();
+        20.0 * rms.log10() > -45.0
+    })
+}
+
 /// Cuts leading/trailing silence (20 ms frames below -45 dBFS), keeping 250 ms padding.
 pub fn trim_silence(audio: &[f32]) -> &[f32] {
     let frame = (SAMPLE_RATE / 50) as usize;

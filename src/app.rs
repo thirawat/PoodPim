@@ -20,7 +20,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Sub
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::asr::OpenThaiAsr;
-use crate::audio::{Recorder, resample};
+use crate::audio::{Recorder, has_sound, resample};
 use crate::config::{Backend, Config};
 use crate::features::SAMPLE_RATE;
 use crate::pipeline::{Outcome, Pipeline};
@@ -50,8 +50,11 @@ const FRAME: Duration = Duration::from_millis(33);
 /// headsets can take a second or two to switch over) or since its last sound: it is gone.
 const MIC_FIRST: Duration = Duration::from_secs(5);
 const MIC_GAP: Duration = Duration::from_secs(2);
-/// How often the unfinished part is transcribed again for the pill (`live_preview`).
-const PREVIEW_EVERY: Duration = Duration::from_millis(700);
+/// How often, at most, the unfinished part is transcribed again for the pill (`live_preview`);
+/// also no sooner than 3x the time the last one took, so a slower PC previews less often. Each
+/// preview takes all the model's threads: every 0.7 s it cost ~0.8 of a core while speaking,
+/// now ~0.3 (with `has_sound`: none in silence).
+const PREVIEW_EVERY: Duration = Duration::from_millis(1200);
 /// The preview transcribes at most this much of the end of the unfinished part: the pill shows
 /// ~42 characters (3-5 s of speech), and a whole 16 s part took 660 ms each time (M3), using
 /// the CPU all the time and making the last part wait after the key was let go.
@@ -184,6 +187,10 @@ struct App {
     preview: (usize, String, bool),
     preview_at: Instant,
     preview_busy: Arc<std::sync::atomic::AtomicBool>,
+    /// How long the last preview took, in ms.
+    preview_cost: Arc<std::sync::atomic::AtomicU64>,
+    /// The part and the recording length at the last preview: the next one needs new sound.
+    preview_from: (usize, usize),
     /// The microphone watchdog: samples recorded at the last check, when that number last
     /// grew, and whether the recording was ended because the microphone stopped.
     mic_len: usize,
@@ -339,6 +346,8 @@ pub fn run() -> Result<()> {
         preview: (0, String::new(), false),
         preview_at: Instant::now(),
         preview_busy: Default::default(),
+        preview_cost: Default::default(),
+        preview_from: (0, 0),
         mic_len: 0,
         mic_seen: Instant::now(),
         mic_lost: false,
@@ -1310,6 +1319,7 @@ impl App {
     /// Sets up the segmenter and the background transcription worker for a new recording.
     fn start_pipeline(&mut self) {
         self.rec_gen += 1;
+        self.preview_from = (usize::MAX, 0); // a new recording: its first preview needs no new sound
         self.end_live();
         let (p, generation) = (self.proxy.clone(), self.rec_gen);
         let on_part = move |t: &str| {
@@ -1465,29 +1475,38 @@ impl App {
         use std::sync::atomic::Ordering;
         let (Some(asr), Some(seg), Some(pipe)) = (self.asr.clone(), self.segmenter.as_ref(), self.pipeline.as_ref()) else { return };
         let (done, sent) = pipe.progress();
-        if done < sent || self.preview_busy.load(Ordering::SeqCst) || self.preview_at.elapsed() < PREVIEW_EVERY {
+        let every = PREVIEW_EVERY.max(Duration::from_millis(3 * self.preview_cost.load(Ordering::SeqCst)));
+        if done < sent || self.preview_busy.load(Ordering::SeqCst) || self.preview_at.elapsed() < every {
             return;
         }
         let (start, rate, part) = (seg.start(), self.recorder.rate(), sent);
         let window = (PREVIEW_WINDOW.as_secs_f32() * rate as f32) as usize;
-        let (raw, clipped) = self.recorder.with_buffer(|b| {
+        // New sound since the last preview of this part (all of it, for a new part)?
+        let seen = if self.preview_from.0 == part { self.preview_from.1.max(start) } else { start };
+        let (raw, clipped, fresh, len) = self.recorder.with_buffer(|b| {
             let from = start.max(b.len().saturating_sub(window));
-            (b.get(from..).map(<[f32]>::to_vec).unwrap_or_default(), from > start)
+            let fresh = b.get(seen..).is_some_and(|new| has_sound(new, rate));
+            (b.get(from..).map(<[f32]>::to_vec).unwrap_or_default(), from > start, fresh, b.len())
         });
-        if raw.len() < rate as usize {
-            return; // under a second: nothing worth showing yet
+        if raw.len() < rate as usize || !fresh {
+            return; // under a second: nothing worth showing yet; or nothing new was said
         }
         self.preview_at = Instant::now();
+        self.preview_from = (part, len);
         self.preview_busy.store(true, Ordering::SeqCst);
-        let (busy, p, generation) = (self.preview_busy.clone(), self.proxy.clone(), self.rec_gen);
+        let (busy, cost, p, generation) = (self.preview_busy.clone(), self.preview_cost.clone(), self.proxy.clone(), self.rec_gen);
         let (mixed, vocabulary) = (self.cfg.mixed_english, self.vocabulary.clone());
         std::thread::spawn(move || {
+            let took = Instant::now();
             let audio = resample(&raw, rate, SAMPLE_RATE);
-            // A finished part may have just been queued: it goes first.
+            // A finished part may have just been queued: it goes first. (Greedy decoding instead
+            // of beam search saved only ~10% of the preview's CPU, and wrote the English words
+            // in Thai letters, so the pill would show other words than the ones typed.)
             let text = match asr.try_lock() {
                 Ok(mut asr) => asr.transcribe(&audio, mixed, &vocabulary).ok(),
                 Err(_) => None,
             };
+            cost.store(took.elapsed().as_millis() as u64, Ordering::SeqCst);
             busy.store(false, Ordering::SeqCst);
             if let Some(text) = text {
                 let _ = p.send_event(UserEvent::Preview(generation, part, text, clipped));

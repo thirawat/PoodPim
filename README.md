@@ -102,9 +102,11 @@ part and put back after the last. Hold-to-talk still types everything on release
 Settings → Typing while you speak.
 
 **Seeing the words while you speak:** with the local model, the pill shows the end of what it
-has heard so far, updated about every 0.7 s: the unfinished part is transcribed again in the
-background (only its last 6 s, ~250 ms on an M3), only while the model has nothing else to do,
-so typing is never held up. Off in Settings → Show words in the pill.
+has heard so far, updated about every 1.2 s while you speak (not in silence): the unfinished part
+is transcribed again in the background (only its last 6 s, ~250 ms on an M3), only while the
+model has nothing else to do, so typing is never held up. On a slower PC it updates less often.
+It costs about a third of a CPU core while you speak (measured on an M3: 53 s of speech took
+~31 CPU-seconds with it, ~15 without). Off in Settings → Show words in the pill.
 
 Numbers said in words become digits ("สองร้อยห้าสิบ" → 250, "สามจุดสอง" → 3.2,
 "ห้าสิบเปอร์เซ็นต์" → 50%), carefully: a lone number word only after a word that asks for a
