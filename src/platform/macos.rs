@@ -172,7 +172,6 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                     capture_escape();
                 }
                 sink(HotkeyEvent::Ready);
-                warned = false;
                 loop {
                     CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, Duration::from_secs(1), false);
                     if disabled.swap(false, Ordering::SeqCst) {

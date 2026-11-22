@@ -41,6 +41,10 @@ pub struct Config {
     /// Only put the transcript on the clipboard, never press ⌘V / Ctrl+V (Remote Desktop,
     /// apps that don't take a pasted keystroke): the user pastes it where they want.
     pub copy_only: bool,
+    /// The microphone to record from (a cpal device id, see audio::microphones); empty: the
+    /// system's default. E.g. the Mac's own one, so Bluetooth headphones keep playing in
+    /// high quality instead of switching to their headset mode.
+    pub microphone: String,
     /// Said "later" to replacing the old full-precision model with the smaller int8 one.
     pub model_upgrade_declined: bool,
 }
@@ -59,6 +63,7 @@ impl Default for Config {
             live_typing: true,
             live_preview: true,
             copy_only: false,
+            microphone: String::new(),
             model_upgrade_declined: false,
         }
     }

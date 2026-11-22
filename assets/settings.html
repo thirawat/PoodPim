@@ -63,9 +63,9 @@
   button.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
   button.btn.danger { color: var(--danger); }
   button:disabled { opacity: .45; cursor: default; }
-  input.field { font: inherit; font-size: 13.5px; color: var(--text); background: var(--field); border: 1px solid var(--field-line);
+  input.field, select.field { font: inherit; font-size: 13.5px; color: var(--text); background: var(--field); border: 1px solid var(--field-line);
     border-radius: 7px; padding: 6px 9px; width: 100%; -webkit-user-select: text; user-select: text; }
-  input.field:focus { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); border-color: var(--accent); }
+  input.field:focus, select.field:focus { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); border-color: var(--accent); }
   .pair { display: flex; gap: 8px; align-items: center; }
   .pair .arrow { color: var(--muted); flex: none; }
   .grid { display: grid; grid-template-columns: auto 1fr; gap: 8px 10px; align-items: center; }
@@ -170,6 +170,11 @@
 <h2>ทั่วไป</h2>
 <div class="card">
   <div class="row">
+    <div class="text"><div class="label">ไมโครโฟน</div>
+      <div class="hint">ใช้หูฟัง Bluetooth แล้วเสียงเพลงแย่ลงตอนพูด? เลือกไมค์ในตัวเครื่อง</div></div>
+    <select class="field" id="mic" style="max-width: 220px"></select>
+  </div>
+  <div class="row">
     <div class="text"><div class="label">คืนข้อความเดิมใน clipboard หลังวาง</div>
       <div class="hint">และไม่ให้ข้อความที่พูดไปค้างในประวัติ clipboard</div></div>
     <label class="switch"><input type="checkbox" data-set="restore"><span></span></label>
@@ -232,6 +237,11 @@
     $("key").placeholder = s.hasKey ? "เว้นว่าง = ใช้ key เดิม" : "ใส่ API key";
     $("server-hint").textContent = s.serverUrl ? "" : "ขอ URL และ key ได้จากคนดูแลเซิร์ฟเวอร์";
     document.querySelectorAll("[data-set]").forEach((i) => (i.checked = !!s[i.dataset.set]));
+    if (document.activeElement !== $("mic")) {
+      const mics = [["", s.defaultMic ? `ตามระบบ (${s.defaultMic})` : "ตามระบบ"], ...s.mics];
+      if (s.mic && !s.mics.some(([id]) => id === s.mic)) mics.push([s.mic, "ไมค์ที่เลือกไว้ (ไม่ได้เสียบอยู่)"]);
+      $("mic").replaceChildren(...mics.map(([id, name]) => new Option(name, id, false, id === s.mic)));
+    }
     $("vocab-count").textContent = `(${s.vocabCount} คำ)`;
     $("corr-count").textContent = `(${s.correctionsCount} คู่)`;
     $("update").disabled = !s.updates;
@@ -249,6 +259,9 @@
     btn.addEventListener("click", () => send({ cmd: "backend", value: btn.dataset.backend })));
   document.querySelectorAll("[data-open]").forEach((btn) =>
     btn.addEventListener("click", () => send({ cmd: "open", what: btn.dataset.open })));
+  // The list is read again when the pointer comes near (before it opens: not redrawn while open).
+  $("mic").addEventListener("pointerenter", () => send({ cmd: "mics" }));
+  $("mic").addEventListener("change", () => send({ cmd: "mic", value: $("mic").value }));
   $("download").addEventListener("click", () => send({ cmd: "download" }));
   $("update").addEventListener("click", () => send({ cmd: "update" }));
   $("uninstall").addEventListener("click", () => send({ cmd: "uninstall" }));

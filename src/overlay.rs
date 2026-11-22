@@ -23,6 +23,8 @@ pub enum Phase {
     /// The microphone stopped sending sound (unplugged, Bluetooth dropped): what was heard
     /// until then was typed.
     MicLost,
+    /// The microphone sent only digital silence (muted, or the wrong one).
+    MicSilent,
     Cancelled,
     Failed,
 }
@@ -42,6 +44,7 @@ impl Phase {
             Phase::Copied { elevated: false } => format!("คัดลอกไว้แล้ว กด {} เพื่อวาง", crate::platform::PASTE_KEY_LABEL),
             Phase::NoSpeech => "ไม่ได้ยินเสียงพูด".into(),
             Phase::MicLost => "ไมโครโฟนหยุดส่งเสียง จึงจบให้ก่อน".into(),
+            Phase::MicSilent => "ไมโครโฟนไม่ส่งเสียงมาเลย ปิดเสียงไมค์อยู่ หรือเลือกไมค์ผิดตัว?".into(),
             Phase::Cancelled => "ยกเลิกแล้ว".into(),
             Phase::Failed => "ถอดเสียงไม่สำเร็จ (ดูในเมนู)".into(),
         }
@@ -52,7 +55,7 @@ impl Phase {
         match self {
             Phase::Done => Some(Duration::from_millis(900)),
             Phase::NoSpeech | Phase::Cancelled => Some(Duration::from_millis(1200)),
-            Phase::Failed | Phase::Copied { .. } | Phase::MicLost => Some(Duration::from_millis(3500)),
+            Phase::Failed | Phase::Copied { .. } | Phase::MicLost | Phase::MicSilent => Some(Duration::from_millis(3500)),
             Phase::Ready => Some(Duration::from_millis(3000)),
             _ => None,
         }
@@ -63,7 +66,7 @@ impl Phase {
             Phase::Listening { .. } => [1.0, 0.27, 0.23],
             Phase::Working => [1.0, 0.70, 0.25],
             Phase::Done | Phase::Ready => [0.20, 0.84, 0.29],
-            Phase::Copied { .. } | Phase::MicLost => [1.0, 0.70, 0.25],
+            Phase::Copied { .. } | Phase::MicLost | Phase::MicSilent => [1.0, 0.70, 0.25],
             Phase::Failed => [1.0, 0.27, 0.23],
             _ => [0.6, 0.6, 0.62],
         }

@@ -196,6 +196,10 @@ struct App {
     mic_len: usize,
     mic_seen: Instant,
     mic_lost: bool,
+    /// The last recording was all digital zeros: the microphone is muted (or the wrong one).
+    mic_silent: bool,
+    /// Microphones for the Settings page: (id, name), read when it opens.
+    mics: Vec<(String, String)>,
     /// Checks in a row (POLL apart) that found the talk key up while the app thought it held
     /// (`check_talk_key`).
     key_up_seen: u32,
@@ -351,6 +355,8 @@ pub fn run() -> Result<()> {
         mic_len: 0,
         mic_seen: Instant::now(),
         mic_lost: false,
+        mic_silent: false,
+        mics: Vec::new(),
         key_up_seen: 0,
         key_down_seen: false,
         secure_seen: false,
@@ -412,7 +418,7 @@ pub fn run() -> Result<()> {
                 app.apply_autostart();
                 // For testing the Settings window without the tray menu.
                 app.want_settings = std::env::var_os("POODPIM_OPEN_SETTINGS").is_some();
-                Recorder::warm_up();
+                Recorder::warm_up(app.cfg.microphone.clone());
                 app.start_backend();
                 // First launch in Local mode: ask about the model now, not on the first key press.
                 if app.state == State::NeedsModel {
@@ -893,7 +899,13 @@ impl App {
                     self.overlay.set(Phase::Failed);
                 } else {
                     eprintln!("no speech in {:.1}s of audio", out.audio_s);
-                    self.overlay.set(if self.mic_lost { Phase::MicLost } else { Phase::NoSpeech });
+                    self.overlay.set(if self.mic_lost {
+                        Phase::MicLost
+                    } else if self.mic_silent {
+                        Phase::MicSilent
+                    } else {
+                        Phase::NoSpeech
+                    });
                 }
                 if self.mic_lost {
                     self.status_text = "The microphone stopped sending sound: check it, or pick another one in the system settings".into();
@@ -1244,7 +1256,7 @@ impl App {
                     // and the key may be let go meanwhile (`check_talk_key`).
                     platform::set_listening(true);
                     self.key_down_seen = platform::talk_key_down() == Some(true);
-                    match self.recorder.start() {
+                    match self.recorder.start(&self.cfg.microphone) {
                         Ok(()) => {
                             // From the key press, not from now: opening the microphone can take
                             // a second or more (Windows, Bluetooth headsets), and timing from here
@@ -1587,6 +1599,11 @@ impl App {
         let raw = self.recorder.stop_raw();
         let rate = self.recorder.rate();
         eprintln!("recorded {:.2}s at {rate} Hz", raw.len() as f64 / rate.max(1) as f64);
+        // Real silence still has a little noise; nothing at all means a muted microphone.
+        self.mic_silent = raw.len() > rate as usize / 2 && raw.iter().all(|&v| v == 0.0);
+        if self.mic_silent {
+            eprintln!("the microphone sent only silence (muted?)");
+        }
         let (Some(seg), Some(mut pipe)) = (self.segmenter.take(), self.pipeline.take()) else {
             self.state = State::Idle;
             self.overlay.set(Phase::Hidden);
@@ -1706,6 +1723,9 @@ impl App {
             "digits": self.cfg.numbers_as_digits,
             "restore": self.cfg.restore_clipboard,
             "copyOnly": self.cfg.copy_only,
+            "mics": self.mics,
+            "mic": self.cfg.microphone,
+            "defaultMic": crate::audio::default_microphone().unwrap_or_default(),
             "unload": self.cfg.unload_when_idle,
             "live": self.cfg.live_typing,
             "preview": self.cfg.live_preview,
@@ -1741,7 +1761,20 @@ impl App {
         let text = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
         eprintln!("settings: {} {}", v["cmd"].as_str().unwrap_or("?"), v["key"].as_str().unwrap_or(""));
         match v["cmd"].as_str().unwrap_or("") {
+            "mics" => {
+                self.mics = crate::audio::microphones();
+                if let Some(w) = &mut self.settings {
+                    w.forget_state();
+                }
+            }
+            "mic" => {
+                self.cfg.microphone = text("value");
+                self.cfg.save();
+                eprintln!("microphone: {}", if self.cfg.microphone.is_empty() { "the system's" } else { "chosen" });
+                Recorder::warm_up(self.cfg.microphone.clone());
+            }
             "ready" => {
+                self.mics = crate::audio::microphones();
                 self.reload_vocabulary();
                 if let Some(w) = &mut self.settings {
                     w.forget_state();
