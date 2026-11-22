@@ -1385,7 +1385,7 @@ impl App {
             return; // left for the end, with every part after it (they must stay in order)
         }
         let window = platform::focused_window();
-        if self.typer.as_ref().is_some_and(|(_, w)| *w != window) || platform::foreground_is_elevated() {
+        if self.typer.as_ref().is_some_and(|(_, w)| *w != window) || platform::foreground_is_elevated() || !platform::accessibility_trusted(false) {
             eprintln!("the focused window changed: the rest waits for the end");
             return;
         }
@@ -1620,12 +1620,15 @@ impl App {
         if text.is_empty() {
             return Phase::Done;
         }
-        if self.cfg.copy_only || crate::platform::foreground_is_elevated() {
-            if !self.cfg.copy_only {
+        let trusted = platform::accessibility_trusted(false);
+        if self.cfg.copy_only || !trusted || crate::platform::foreground_is_elevated() {
+            if !trusted {
+                eprintln!("no Accessibility permission: copied instead of pasting");
+            } else if !self.cfg.copy_only {
                 eprintln!("focused app runs as administrator: copied instead of pasting");
             }
             return match inserter::copy_text(&text) {
-                Ok(()) => Phase::Copied { elevated: !self.cfg.copy_only },
+                Ok(()) => Phase::Copied { elevated: trusted && !self.cfg.copy_only },
                 Err(e) => {
                     eprintln!("copy error: {e:#}");
                     Phase::Failed

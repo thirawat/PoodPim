@@ -172,10 +172,25 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                     capture_escape();
                 }
                 sink(HotkeyEvent::Ready);
+                warned = false;
                 loop {
                     CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, Duration::from_secs(1), false);
                     if disabled.swap(false, Ordering::SeqCst) {
                         tap.enable();
+                    }
+                    // Accessibility taken away while running: the taps get nothing more (and one
+                    // that can drop events must not stay in the way of every key, Handy #1281).
+                    // Drop both, say so, and make them again once it is given back.
+                    if !accessibility_trusted(false) {
+                        eprintln!("Accessibility permission was taken away: waiting for it again");
+                        {
+                            let _switch = ESC_SWITCH.lock().unwrap_or_else(|e| e.into_inner());
+                            ESC_TAP.store(0, Ordering::SeqCst); // the tap goes away below
+                        }
+                        ESC_HELD.store(false, Ordering::SeqCst);
+                        sink(HotkeyEvent::PermissionMissing);
+                        warned = true;
+                        break; // dropping the taps invalidates them
                     }
                 }
             }
