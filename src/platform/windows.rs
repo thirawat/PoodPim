@@ -180,6 +180,17 @@ pub fn release_hidden() -> bool {
 }
 
 pub fn send_paste() {
+    // A Shift, Alt or Windows key the user still holds would turn Ctrl+V into another shortcut
+    // (Handy #2051): wait for it to be let go, at most half a second. (Right Alt, the talk key,
+    // never reaches Windows.)
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LMENU, VK_LWIN, VK_RWIN, VK_SHIFT};
+    let held = || [VK_SHIFT, VK_LMENU, VK_LWIN, VK_RWIN].iter().any(|k| unsafe { GetAsyncKeyState(i32::from(k.0)) } < 0);
+    for _ in 0..25 {
+        if !held() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     send_keys(&[(VK_CONTROL, true), (VK_V, true), (VK_V, false), (VK_CONTROL, false)]);
 }
 
