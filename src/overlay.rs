@@ -13,6 +13,8 @@ pub enum Phase {
     Ready,
     Listening { handsfree: bool },
     Working,
+    /// Still transcribing, and the talk key was pressed again (that press starts nothing).
+    StillWorking,
     Done,
     /// Pasting into the focused app isn't possible (Windows: it runs as administrator):
     /// the text is on the clipboard for the user to paste.
@@ -39,6 +41,7 @@ impl Phase {
                 format!("กำลังฟัง… แตะ {} อีกครั้งเพื่อจบ", crate::platform::TALK_KEY_LABEL)
             }
             Phase::Working => "กำลังถอดเสียง…".into(),
+            Phase::StillWorking => "ยังถอดเสียงครั้งก่อนอยู่ รอสักครู่แล้วค่อยกดพูดใหม่".into(),
             Phase::Done => "✓ พิมพ์แล้ว".into(),
             Phase::Copied { elevated: true } => "คัดลอกไว้แล้ว กด Ctrl+V เอง (แอปนี้รันแบบ Administrator)".into(),
             Phase::Copied { elevated: false } => format!("คัดลอกไว้แล้ว กด {} เพื่อวาง", crate::platform::PASTE_KEY_LABEL),
@@ -64,7 +67,7 @@ impl Phase {
     fn rgb(&self) -> [f64; 3] {
         match self {
             Phase::Listening { .. } => [1.0, 0.27, 0.23],
-            Phase::Working => [1.0, 0.70, 0.25],
+            Phase::Working | Phase::StillWorking => [1.0, 0.70, 0.25],
             Phase::Done | Phase::Ready => [0.20, 0.84, 0.29],
             Phase::Copied { .. } | Phase::MicLost | Phase::MicSilent => [1.0, 0.70, 0.25],
             Phase::Failed => [1.0, 0.27, 0.23],
@@ -208,7 +211,7 @@ impl Overlay {
                     let wobble = 0.75 + 0.25 * (t * 9.0 + fi * 1.3).sin();
                     0.12 + 0.88 * self.shown * SHAPE[i] * wobble
                 }
-                Phase::Working => 0.15 + 0.45 * (0.5 + 0.5 * (t * 6.0 - fi * 0.9).sin()),
+                Phase::Working | Phase::StillWorking => 0.15 + 0.45 * (0.5 + 0.5 * (t * 6.0 - fi * 0.9).sin()),
                 _ => 0.15,
             };
         }

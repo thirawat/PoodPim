@@ -1279,6 +1279,10 @@ impl App {
                             self.overlay.set(Phase::Failed);
                         }
                     }
+                } else if self.state == State::Transcribing {
+                    // E.g. a server waking up from a cold start: say why nothing happens.
+                    eprintln!("talk key pressed while still transcribing: nothing started");
+                    self.overlay.set(Phase::StillWorking);
                 }
             }
             HotkeyEvent::TalkUp => {
