@@ -1380,7 +1380,7 @@ impl App {
         let text = corrections::finish(&text, &self.corrections, self.cfg.numbers_as_digits);
         self.heard.push(text.clone());
         self.show_heard();
-        let live = self.cfg.live_typing && self.handsfree && self.state == State::Recording;
+        let live = self.cfg.live_typing && !self.cfg.copy_only && self.handsfree && self.state == State::Recording;
         if !live || self.typed.len() + 1 != self.heard.len() {
             return; // left for the end, with every part after it (they must stay in order)
         }
@@ -1617,8 +1617,10 @@ impl App {
         if text.is_empty() {
             return Phase::Done;
         }
-        if crate::platform::foreground_is_elevated() {
-            eprintln!("focused app runs as administrator: copied instead of pasting");
+        if self.cfg.copy_only || crate::platform::foreground_is_elevated() {
+            if !self.cfg.copy_only {
+                eprintln!("focused app runs as administrator: copied instead of pasting");
+            }
             return match inserter::copy_text(&text) {
                 Ok(()) => Phase::Copied,
                 Err(e) => {
@@ -1697,6 +1699,7 @@ impl App {
             "mixed": self.cfg.mixed_english,
             "digits": self.cfg.numbers_as_digits,
             "restore": self.cfg.restore_clipboard,
+            "copyOnly": self.cfg.copy_only,
             "unload": self.cfg.unload_when_idle,
             "live": self.cfg.live_typing,
             "preview": self.cfg.live_preview,
@@ -1747,6 +1750,7 @@ impl App {
                     "live" => self.cfg.live_typing = on,
                     "preview" => self.cfg.live_preview = on,
                     "restore" => self.cfg.restore_clipboard = on,
+                    "copyOnly" => self.cfg.copy_only = on,
                     "unload" => {
                         self.cfg.unload_when_idle = on;
                         self.last_used = Instant::now();

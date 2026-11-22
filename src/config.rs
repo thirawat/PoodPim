@@ -36,8 +36,11 @@ pub struct Config {
     /// the user is still speaking, instead of all of it at the end.
     pub live_typing: bool,
     /// While listening, the pill shows what has been heard so far (local model only: it
-    /// transcribes the unfinished part again about every 0.7 s).
+    /// transcribes the unfinished part again about every 1.2 s, see app.rs PREVIEW_EVERY).
     pub live_preview: bool,
+    /// Only put the transcript on the clipboard, never press ⌘V / Ctrl+V (Remote Desktop,
+    /// apps that don't take a pasted keystroke): the user pastes it where they want.
+    pub copy_only: bool,
     /// Said "later" to replacing the old full-precision model with the smaller int8 one.
     pub model_upgrade_declined: bool,
 }
@@ -55,6 +58,7 @@ impl Default for Config {
             unload_when_idle: false,
             live_typing: true,
             live_preview: true,
+            copy_only: false,
             model_upgrade_declined: false,
         }
     }
