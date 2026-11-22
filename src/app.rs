@@ -451,8 +451,8 @@ pub fn run() -> Result<()> {
                     } else if let Some(k) = app.recent_ids.iter().position(|(p, f)| p == id || f == id) {
                         let text = app.recent[k].clone();
                         if app.recent_ids[k].0 == *id {
-                            if app.paste(text) == Phase::Copied {
-                                app.overlay.set(Phase::Copied);
+                            if let phase @ Phase::Copied { .. } = app.paste(text) {
+                                app.overlay.set(phase);
                             }
                         } else {
                             app.ask_correction(&text);
@@ -461,8 +461,8 @@ pub fn run() -> Result<()> {
                         let last = app.last_text.clone();
                         app.ask_correction(&last);
                     } else if id == ui.paste_last.id() {
-                        if app.paste(app.last_text.clone()) == Phase::Copied {
-                            app.overlay.set(Phase::Copied);
+                        if let phase @ Phase::Copied { .. } = app.paste(app.last_text.clone()) {
+                            app.overlay.set(phase);
                         }
                     } else if id == ui.download.id() {
                         app.start_download();
@@ -879,7 +879,7 @@ impl App {
                             eprintln!("the focused window changed while typing: copied the rest");
                             typer.finish();
                             match inserter::copy_text(&rest) {
-                                Ok(()) => Phase::Copied,
+                                Ok(()) => Phase::Copied { elevated: platform::foreground_is_elevated() },
                                 Err(e) => {
                                     eprintln!("copy error: {e:#}");
                                     Phase::Failed
@@ -1622,7 +1622,7 @@ impl App {
                 eprintln!("focused app runs as administrator: copied instead of pasting");
             }
             return match inserter::copy_text(&text) {
-                Ok(()) => Phase::Copied,
+                Ok(()) => Phase::Copied { elevated: !self.cfg.copy_only },
                 Err(e) => {
                     eprintln!("copy error: {e:#}");
                     Phase::Failed

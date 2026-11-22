@@ -16,7 +16,9 @@ pub enum Phase {
     Done,
     /// Pasting into the focused app isn't possible (Windows: it runs as administrator):
     /// the text is on the clipboard for the user to paste.
-    Copied,
+    /// The text is on the clipboard for the user to paste. `elevated`: because the focused app
+    /// runs as administrator (Windows); else asked for (copy only) or the window changed.
+    Copied { elevated: bool },
     NoSpeech,
     /// The microphone stopped sending sound (unplugged, Bluetooth dropped): what was heard
     /// until then was typed.
@@ -36,7 +38,8 @@ impl Phase {
             }
             Phase::Working => "กำลังถอดเสียง…".into(),
             Phase::Done => "✓ พิมพ์แล้ว".into(),
-            Phase::Copied => "คัดลอกไว้แล้ว กด Ctrl+V เอง (แอปนี้รันแบบ Administrator)".into(),
+            Phase::Copied { elevated: true } => "คัดลอกไว้แล้ว กด Ctrl+V เอง (แอปนี้รันแบบ Administrator)".into(),
+            Phase::Copied { elevated: false } => format!("คัดลอกไว้แล้ว กด {} เพื่อวาง", crate::platform::PASTE_KEY_LABEL),
             Phase::NoSpeech => "ไม่ได้ยินเสียงพูด".into(),
             Phase::MicLost => "ไมโครโฟนหยุดส่งเสียง จึงจบให้ก่อน".into(),
             Phase::Cancelled => "ยกเลิกแล้ว".into(),
@@ -49,7 +52,7 @@ impl Phase {
         match self {
             Phase::Done => Some(Duration::from_millis(900)),
             Phase::NoSpeech | Phase::Cancelled => Some(Duration::from_millis(1200)),
-            Phase::Failed | Phase::Copied | Phase::MicLost => Some(Duration::from_millis(3500)),
+            Phase::Failed | Phase::Copied { .. } | Phase::MicLost => Some(Duration::from_millis(3500)),
             Phase::Ready => Some(Duration::from_millis(3000)),
             _ => None,
         }
@@ -60,7 +63,7 @@ impl Phase {
             Phase::Listening { .. } => [1.0, 0.27, 0.23],
             Phase::Working => [1.0, 0.70, 0.25],
             Phase::Done | Phase::Ready => [0.20, 0.84, 0.29],
-            Phase::Copied | Phase::MicLost => [1.0, 0.70, 0.25],
+            Phase::Copied { .. } | Phase::MicLost => [1.0, 0.70, 0.25],
             Phase::Failed => [1.0, 0.27, 0.23],
             _ => [0.6, 0.6, 0.62],
         }

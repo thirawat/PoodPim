@@ -203,6 +203,7 @@ pub fn accessibility_trusted(_prompt: bool) -> bool {
 }
 
 pub const TALK_KEY_LABEL: &str = "Right Alt";
+pub const PASTE_KEY_LABEL: &str = "Ctrl+V";
 
 /// Starts the app at login: a value in HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run
 /// pointing at this exe (rewritten on every start, so it follows the app if it is moved).

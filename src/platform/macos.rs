@@ -246,6 +246,7 @@ pub fn foreground_is_elevated() -> bool {
 }
 
 pub const TALK_KEY_LABEL: &str = "Right ⌥";
+pub const PASTE_KEY_LABEL: &str = "⌘V";
 
 /// Where the app's log goes when it isn't started from a terminal.
 pub fn log_dir() -> Option<std::path::PathBuf> {
