@@ -16,8 +16,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_ESCAPE, VK_LCONTROL, VK_RMENU,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, SetWindowsHookExW, WH_KEYBOARD_LL,
-    WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    CallNextHookEx, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, SetTimer, SetWindowsHookExW,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
 };
 
 use super::{HotkeyEvent, HotkeySink};
@@ -36,16 +36,45 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
         .name("hotkey".into())
         .spawn(|| unsafe {
             let module = GetModuleHandleW(None).ok();
-            let hook: Option<HHOOK> =
-                SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), module.map(Into::into), 0).ok();
+            let install = || SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), module.map(Into::into), 0).ok();
+            let mut hook: Option<HHOOK> = install();
             let sink = SINK.get().unwrap();
             if hook.is_none() {
                 sink(HotkeyEvent::PermissionMissing);
                 return;
             }
             sink(HotkeyEvent::Ready);
+            // Windows can drop a low-level hook without telling (after sleep, or a callback that
+            // was slow once, e.g. Handy #1213), and then the talk key silently stops working.
+            // So it is put in again after the PC wakes (the wall clock jumped past the timer)
+            // and every REHOOK_EVERY while nothing is held. The new one goes in before the old
+            // one comes out, so no key is missed.
+            const TICK_MS: u32 = 10_000;
+            const REHOOK_EVERY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+            SetTimer(None, 0, TICK_MS, None);
+            let (mut last_tick, mut hooked_at) = (std::time::SystemTime::now(), std::time::Instant::now());
             let mut msg = MSG::default();
-            while GetMessageW(&mut msg, None, 0, 0).as_bool() {}
+            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                if msg.message != WM_TIMER {
+                    continue;
+                }
+                let now = std::time::SystemTime::now();
+                let woke = now.duration_since(last_tick).is_ok_and(|d| d.as_millis() > 3 * u128::from(TICK_MS));
+                last_tick = now;
+                let idle = !TALK_DOWN.load(Ordering::SeqCst) && !ESC_DOWN.load(Ordering::SeqCst) && !super::listening();
+                if idle
+                    && (woke || hooked_at.elapsed() >= REHOOK_EVERY)
+                    && let Some(new) = install()
+                {
+                    if let Some(old) = hook.replace(new) {
+                        let _ = UnhookWindowsHookEx(old);
+                    }
+                    hooked_at = std::time::Instant::now();
+                    if woke {
+                        eprintln!("keyboard hook put in again after the PC woke up");
+                    }
+                }
+            }
         })
         .expect("spawn hotkey thread");
 }
@@ -133,6 +162,21 @@ static ESC_DOWN_AT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 /// nothing to check against (unlike macOS).
 pub fn talk_key_down() -> Option<bool> {
     None
+}
+
+/// Whether the hook can't see the keyboard now, so a release of the talk key would be missed:
+/// the screen is locked or a UAC prompt is up (another desktop takes the input), or the window
+/// in front runs as administrator (Windows keeps its keys from a normal app's hook).
+pub fn release_hidden() -> bool {
+    use windows::Win32::System::StationsAndDesktops::{CloseDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_SWITCHDESKTOP, OpenInputDesktop};
+    let other_desktop = match unsafe { OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_SWITCHDESKTOP) } {
+        Ok(desk) => {
+            let _ = unsafe { CloseDesktop(desk) };
+            false
+        }
+        Err(_) => true,
+    };
+    other_desktop || foreground_is_elevated()
 }
 
 pub fn send_paste() {

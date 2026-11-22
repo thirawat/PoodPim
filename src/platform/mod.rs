@@ -56,7 +56,7 @@ fn take_escape() -> bool {
 }
 
 /// Listening or cancelling (macOS: the Esc tap stays on until it is off).
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 fn listening() -> bool {
     LISTEN.load(std::sync::atomic::Ordering::SeqCst) != OFF
 }

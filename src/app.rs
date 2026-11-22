@@ -1427,7 +1427,10 @@ impl App {
         let holding = self.state == State::Recording && !self.handsfree && self.stop_at.is_none();
         let down = if holding { platform::talk_key_down() } else { None };
         self.key_down_seen |= down == Some(true);
-        if down != Some(false) || !self.key_down_seen || self.pressed_at.elapsed() < Duration::from_millis(600) {
+        // macOS: the key itself says it is up. Windows: the hook can't see the keyboard now
+        // (locked screen, UAC prompt, administrator window in front), so its release would be lost.
+        let up = (down == Some(false) && self.key_down_seen) || (holding && platform::release_hidden());
+        if !up || self.pressed_at.elapsed() < Duration::from_millis(600) {
             self.key_up_seen = 0;
             return;
         }

@@ -240,6 +240,11 @@ pub fn secure_input() -> bool {
     unsafe { IsSecureEventInputEnabled() }
 }
 
+/// Windows only (the hook can't see the keyboard); macOS checks the key itself (`talk_key_down`).
+pub fn release_hidden() -> bool {
+    false
+}
+
 /// Windows only (an app run as administrator ignores PoodPim's ⌘V there); never on macOS.
 pub fn foreground_is_elevated() -> bool {
     false
