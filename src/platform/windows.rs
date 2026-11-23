@@ -63,6 +63,12 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                 let now = std::time::SystemTime::now();
                 woke |= now.duration_since(last_tick).is_ok_and(|d| d.as_millis() > 3 * u128::from(TICK_MS));
                 last_tick = now;
+                if woke && !super::listening() {
+                    // A key held when the PC went to sleep was let go while the hook couldn't
+                    // see it; left as down, it would keep the hook from being put in again.
+                    TALK_DOWN.store(false, Ordering::SeqCst);
+                    ESC_DOWN.store(false, Ordering::SeqCst);
+                }
                 let idle = !TALK_DOWN.load(Ordering::SeqCst) && !ESC_DOWN.load(Ordering::SeqCst) && !super::listening();
                 if idle
                     && (woke || hooked_at.elapsed() >= REHOOK_EVERY)
@@ -132,7 +138,8 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
-fn send_keys(keys: &[(VIRTUAL_KEY, bool)]) {
+/// Sends the keys; how many of them Windows took (all, unless input is blocked).
+fn send_keys(keys: &[(VIRTUAL_KEY, bool)]) -> usize {
     let inputs: Vec<INPUT> = keys
         .iter()
         .map(|&(vk, down)| INPUT {
@@ -148,9 +155,7 @@ fn send_keys(keys: &[(VIRTUAL_KEY, bool)]) {
             },
         })
         .collect();
-    unsafe {
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-    }
+    unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) as usize }
 }
 
 /// The Esc press being held was taken out by the hook (it cancelled dictation): its repeats and
@@ -190,27 +195,35 @@ pub fn release_hidden() -> bool {
 }
 
 /// Presses Ctrl+V. False: it didn't, as a key the user holds would change it into another
-/// shortcut, or another window came to the front meanwhile (Alt+Tab).
-pub fn send_paste() -> bool {
+/// shortcut, or the window in front isn't `target` (live typing: the window its first part
+/// went to) or changed meanwhile (Alt+Tab), or Windows didn't take the keys.
+pub fn send_paste(target: Option<u64>) -> bool {
     // A Shift, Alt or Windows key the user still holds would turn Ctrl+V into another shortcut
     // (Handy #2051): wait for it to be let go, at most half a second. (Right Alt, the talk key,
     // never reaches Windows.)
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LMENU, VK_LWIN, VK_RWIN, VK_SHIFT};
     let held = || [VK_SHIFT, VK_LMENU, VK_LWIN, VK_RWIN].iter().any(|k| unsafe { GetAsyncKeyState(i32::from(k.0)) } < 0);
-    if held() {
-        let window = focused_window();
-        for _ in 0..25 {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            if !held() {
-                break;
-            }
+    let window = target.unwrap_or_else(focused_window);
+    for _ in 0..25 {
+        if !held() {
+            break;
         }
-        if held() || focused_window() != window {
-            eprintln!("a key is still held or the window changed: copied instead of pasting");
-            return false;
-        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    send_keys(&[(VK_CONTROL, true), (VK_V, true), (VK_V, false), (VK_CONTROL, false)]);
+    if held() || focused_window() != window {
+        eprintln!("a key is still held or another window is in front: copied instead of pasting");
+        return false;
+    }
+    let keys = [(VK_CONTROL, true), (VK_V, true), (VK_V, false), (VK_CONTROL, false)];
+    let sent = send_keys(&keys);
+    if sent != keys.len() {
+        // Some went: don't leave Ctrl or V down.
+        if sent > 0 {
+            send_keys(&[(VK_V, false), (VK_CONTROL, false)]);
+        }
+        eprintln!("Windows took {sent} of the paste keys: copied instead of pasting");
+        return false;
+    }
     true
 }
 

@@ -30,7 +30,7 @@ pub fn paste_text(text: &str, restore: bool) -> Result<bool> {
     let saved = if restore { Some(sys::save()) } else { None };
     let ours = sys::put(text, restore)?;
     sleep(Duration::from_millis(30));
-    if !crate::platform::send_paste() {
+    if !crate::platform::send_paste(None) {
         sys::put(text, false)?; // to stay, not hidden from clipboard managers
         return Ok(false);
     }
@@ -49,35 +49,56 @@ pub fn copy_text(text: &str) -> Result<()> {
     sys::put(text, false).map(|_| ())
 }
 
+/// How a live dictation ended when not all of it could be pasted.
+pub enum Ending {
+    /// The rest is on the clipboard; `elevated`: because the window in front runs as administrator.
+    Copied { elevated: bool },
+    Failed,
+}
+
 /// Types the parts of one dictation while the user is still speaking, in order, on its own
-/// thread. The clipboard is saved before the first part and put back after the last one (not
-/// around every part: something the user copies between two parts would otherwise be lost).
-/// A part whose paste key can't be sent, and every part after it, is copied instead: once the
-/// queued parts are done, as the thread's last clipboard change, so nothing undoes it.
+/// thread, into the window it was started for. The clipboard is saved before the first part
+/// and put back after the last one (not around every part: something the user copies between
+/// two parts would otherwise be lost). A part that can't be pasted (`platform::send_paste`),
+/// and every part after it, is copied instead: once the queued parts are done, as the
+/// thread's last clipboard change, so nothing undoes it.
 pub struct LiveTyper {
     tx: std::sync::mpsc::Sender<Part>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 enum Part {
     Paste(String),
-    /// The end of the dictation, for the user to paste (the window changed, copy-only…).
-    Copy(String),
+    /// The end of the dictation, for the user to paste (the window changed, copy-only…);
+    /// true: because the window in front runs as administrator.
+    Copy(String, bool),
 }
 
 impl LiveTyper {
-    /// `restore`: put the previous clipboard back once `finish` is called. `copied`: called
-    /// at the end if some of the text was copied rather than pasted.
-    pub fn start(restore: bool, copied: impl FnOnce() + Send + 'static) -> Self {
+    /// `restore`: put the previous clipboard back at the end. `window`: where the text goes
+    /// (`platform::focused_window`). `ended`: called if some of the text was copied instead.
+    pub fn start(restore: bool, window: u64, ended: impl FnOnce(Ending) + Send + 'static) -> Self {
+        use std::sync::atomic::Ordering::SeqCst;
         let (tx, rx) = std::sync::mpsc::channel::<Part>();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = cancelled.clone();
         std::thread::spawn(move || {
             let mut saved = None;
             let mut ours = None;
-            let mut left = String::new(); // to copy at the end
+            let (mut left, mut elevated) = (String::new(), false); // to copy at the end
             for part in rx {
+                if stop.load(SeqCst) {
+                    break;
+                }
                 let text = match part {
                     Part::Paste(t) if left.is_empty() => t,
-                    Part::Paste(t) | Part::Copy(t) => {
+                    Part::Paste(t) => {
                         left.push_str(&t);
+                        continue;
+                    }
+                    Part::Copy(t, e) => {
+                        left.push_str(&t);
+                        elevated = e;
                         continue;
                     }
                 };
@@ -90,25 +111,32 @@ impl LiveTyper {
                 match sys::put(&text, restore) {
                     Ok(n) => ours = Some(n),
                     Err(e) => {
-                        eprintln!("live typing: {e:#}");
+                        eprintln!("live typing: {e:#}: this part and the rest are copied at the end");
+                        left = text;
                         continue;
                     }
                 }
                 sleep(Duration::from_millis(30));
-                if !crate::platform::send_paste() {
+                if !crate::platform::send_paste(Some(window)) {
+                    eprintln!("live typing: a part couldn't be pasted: it and the rest are copied at the end");
                     left = text;
                     continue;
                 }
                 sleep(READ_TIME); // before the clipboard changes again
             }
             let _one_at_a_time = PASTING.lock().unwrap_or_else(|e| e.into_inner());
-            if !left.is_empty() {
-                match sys::put(left.trim_start(), false) {
+            if !stop.load(SeqCst) && !left.is_empty() {
+                // As it would have been pasted (a leading space or new line included). Always
+                // reported: the app's pill waits for it.
+                match sys::put(&left, false) {
                     Ok(_) => {
                         eprintln!("live typing: the rest couldn't be pasted: copied");
-                        copied();
+                        ended(Ending::Copied { elevated });
                     }
-                    Err(e) => eprintln!("live typing: copying the rest: {e:#}"),
+                    Err(e) => {
+                        eprintln!("live typing: copying the rest: {e:#}");
+                        ended(Ending::Failed);
+                    }
                 }
             } else if let (Some(saved), Some(ours)) = (saved, ours) {
                 match sys::restore(saved, ours) {
@@ -118,7 +146,7 @@ impl LiveTyper {
                 }
             }
         });
-        Self { tx }
+        Self { tx, cancelled }
     }
 
     /// Queues `text` to be pasted after the parts before it.
@@ -132,8 +160,15 @@ impl LiveTyper {
     pub fn finish(self) {}
 
     /// No more parts, and `text` (the end) is copied rather than pasted, after the queued ones.
-    pub fn finish_copying(self, text: String) {
-        let _ = self.tx.send(Part::Copy(text));
+    /// `elevated`: because the window in front runs as administrator (for the pill).
+    pub fn finish_copying(self, text: String, elevated: bool) {
+        let _ = self.tx.send(Part::Copy(text, elevated));
+    }
+
+    /// Dictation cancelled (Esc): parts not pasted yet are dropped, nothing is copied; the
+    /// clipboard is put back.
+    pub fn cancel(self) {
+        self.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

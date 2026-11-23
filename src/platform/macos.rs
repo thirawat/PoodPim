@@ -198,16 +198,22 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
 }
 
 /// Presses ⌘V. False: it couldn't (no Accessibility permission: macOS would drop the keys).
-pub fn send_paste() -> bool {
+/// `_target` (the app the text is for) isn't checked here: the frontmost app is only kept up
+/// to date on the main thread, which checks it before handing text over.
+pub fn send_paste(_target: Option<u64>) -> bool {
     if !accessibility_trusted(false) {
         return false;
     }
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::CombinedSessionState) else { return false };
-    for down in [true, false] {
-        if let Ok(ev) = CGEvent::new_keyboard_event(src.clone(), KEY_V, down) {
-            ev.set_flags(CGEventFlags::CGEventFlagCommand);
-            ev.post(CGEventTapLocation::HID);
-        }
+    // Both made before either is posted: a ⌘V down without its up would leave V stuck.
+    let (Ok(down), Ok(up)) =
+        (CGEvent::new_keyboard_event(src.clone(), KEY_V, true), CGEvent::new_keyboard_event(src, KEY_V, false))
+    else {
+        return false;
+    };
+    for ev in [down, up] {
+        ev.set_flags(CGEventFlags::CGEventFlagCommand);
+        ev.post(CGEventTapLocation::HID);
         std::thread::sleep(Duration::from_millis(10));
     }
     true

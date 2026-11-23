@@ -76,9 +76,9 @@ enum UserEvent {
     /// The model freed when idle was loaded again for a recording (see `asleep`).
     ModelWoke(u64, Result<Arc<Mutex<OpenThaiAsr>>, String>),
     Transcribed(u64, Outcome),
-    /// The paste key couldn't be sent (no Accessibility permission; Windows: a key still held
-    /// or another window in front), so the text was left on the clipboard.
-    PasteSkipped,
+    /// Text of recording n couldn't be pasted (no Accessibility permission; Windows: a key
+    /// still held or another window in front) and was left on the clipboard: what the pill says.
+    Delivered(u64, Phase),
     /// One segment's text, as soon as it is transcribed (the recording may still go on).
     Part(u64, String),
     /// What the unfinished part (the n-th of the recording, from 0) sounds like so far;
@@ -205,6 +205,12 @@ struct App {
     mics: Vec<(String, String)>,
     /// The system's default microphone's name, looked up with `mics` (not on every loop pass).
     default_mic: String,
+    /// Windows: the last hold was ended by the app, its release unseen (`check_talk_key`). If
+    /// the user was in fact still holding the key, its auto-repeat comes as the next press:
+    /// letting go of that one soon is the end of a hold, not a tap for hands-free.
+    after_hidden: bool,
+    /// This recording's press was that one (`after_hidden`): it can't turn hands-free.
+    hold_only: bool,
     /// Checks in a row (POLL apart) that found the talk key up while the app thought it held
     /// (`check_talk_key`).
     key_up_seen: u32,
@@ -363,6 +369,8 @@ pub fn run() -> Result<()> {
         mic_silent: false,
         mics: Vec::new(),
         default_mic: String::new(),
+        after_hidden: false,
+        hold_only: false,
         key_up_seen: 0,
         key_down_seen: false,
         secure_seen: false,
@@ -894,13 +902,16 @@ impl App {
                         Some((typer, _)) => {
                             eprintln!("can't paste the rest where the first parts went: copied it");
                             // By the typer, after its queued parts: its own clipboard changes come
-                            // first and can't put back the old clipboard over the copy.
-                            typer.finish_copying(continuation(&typed, &rest));
-                            Phase::Copied { elevated: deliver && platform::foreground_is_elevated() }
+                            // first and can't put back the old clipboard over the copy. It says
+                            // when the copy is there (Delivered); till then the pill stays Working.
+                            typer.finish_copying(continuation(&typed, &rest), deliver && platform::foreground_is_elevated());
+                            Phase::Working
                         }
                         None => self.paste(rest),
                     };
-                    self.overlay.set(if phase == Phase::Done && self.mic_lost { Phase::MicLost } else { phase });
+                    if phase != Phase::Working {
+                        self.overlay.set(if phase == Phase::Done && self.mic_lost { Phase::MicLost } else { phase });
+                    }
                 } else if !out.errors.is_empty() {
                     self.overlay.set(Phase::Failed);
                 } else {
@@ -1043,7 +1054,12 @@ impl App {
                     self.show_heard();
                 }
             }
-            UserEvent::PasteSkipped => self.overlay.set(Phase::Copied { elevated: false }),
+            UserEvent::Delivered(generation, phase) => {
+                // Not over a newer recording's pill.
+                if generation == self.rec_gen && self.state == State::Idle {
+                    self.overlay.set(phase);
+                }
+            }
             UserEvent::DecoderInt8(r) => match r {
                 Ok(()) => {
                     eprintln!("downloaded the int8 decoder: switching to it");
@@ -1233,6 +1249,7 @@ impl App {
     fn on_hotkey(&mut self, h: HotkeyEvent, at: Instant) {
         match h {
             HotkeyEvent::TalkDown => {
+                let after_hidden = std::mem::take(&mut self.after_hidden);
                 // Not set up yet: ask for what's missing instead of recording.
                 if !self.busy() {
                     if self.cfg.backend == Backend::Lambda
@@ -1269,6 +1286,7 @@ impl App {
                             // a second or more (Windows, Bluetooth headsets), and timing from here
                             // turned short holds into taps (hands-free mode).
                             self.pressed_at = at;
+                            self.hold_only = after_hidden;
                             eprintln!("microphone started in {} ms", started.elapsed().as_millis());
                             self.state = State::Recording;
                             (self.mic_len, self.mic_seen, self.mic_lost) = (0, Instant::now(), false);
@@ -1296,7 +1314,7 @@ impl App {
                 if self.state == State::Recording && !self.handsfree {
                     let held = at.saturating_duration_since(self.pressed_at);
                     eprintln!("talk key held {} ms", held.as_millis());
-                    if held < TAP {
+                    if held < TAP && !self.hold_only {
                         self.handsfree = true;
                         if self.cfg.live_typing
                             && let Some(seg) = self.segmenter.as_mut()
@@ -1320,7 +1338,10 @@ impl App {
                         p.cancel();
                     }
                     self.rec_gen += 1;
-                    self.end_live(); // what was typed already stays
+                    if let Some((typer, _)) = self.typer.take() {
+                        typer.cancel(); // what was typed already stays; parts still queued don't
+                    }
+                    self.end_live();
                     self.handsfree = false;
                     self.state = State::Idle;
                     eprintln!("cancelled with Esc");
@@ -1418,11 +1439,15 @@ impl App {
             eprintln!("the focused window changed: the rest waits for the end");
             return;
         }
-        let (restore, p) = (self.cfg.restore_clipboard, self.proxy.clone());
-        let copied = move || {
-            let _ = p.send_event(UserEvent::PasteSkipped);
+        let (restore, p, generation) = (self.cfg.restore_clipboard, self.proxy.clone(), self.rec_gen);
+        let ended = move |e: inserter::Ending| {
+            let phase = match e {
+                inserter::Ending::Copied { elevated } => Phase::Copied { elevated },
+                inserter::Ending::Failed => Phase::Failed,
+            };
+            let _ = p.send_event(UserEvent::Delivered(generation, phase));
         };
-        let (typer, _) = self.typer.get_or_insert_with(|| (inserter::LiveTyper::start(restore, copied), window));
+        let (typer, _) = self.typer.get_or_insert_with(|| (inserter::LiveTyper::start(restore, window, ended), window));
         typer.type_text(continuation(&self.typed, &text));
         self.typed.push(text);
     }
@@ -1475,6 +1500,7 @@ impl App {
             self.key_up_seen = 0;
             if !seen_up {
                 platform::forget_talk_key();
+                self.after_hidden = true;
             }
             self.on_hotkey(HotkeyEvent::TalkUp, Instant::now());
         }
@@ -1676,11 +1702,11 @@ impl App {
                 }
             };
         }
-        let (restore, p) = (self.cfg.restore_clipboard, self.proxy.clone());
+        let (restore, p, generation) = (self.cfg.restore_clipboard, self.proxy.clone(), self.rec_gen);
         std::thread::spawn(move || match inserter::paste_text(&text, restore) {
             Ok(true) => {}
             Ok(false) => {
-                let _ = p.send_event(UserEvent::PasteSkipped);
+                let _ = p.send_event(UserEvent::Delivered(generation, Phase::Copied { elevated: false }));
             }
             Err(e) => eprintln!("paste error: {e:#}"),
         });
