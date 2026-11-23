@@ -32,6 +32,8 @@ use crate::hotwords::{self, Hotwords};
 use crate::{inserter, model, update};
 
 const TAP: Duration = Duration::from_millis(300);
+/// How long after a hold ended unseen (`App::after_hidden`) a press can't turn hands-free.
+const AFTER_HIDDEN: Duration = Duration::from_secs(30);
 /// Safety cap on one recording; it is finished automatically after this.
 const MAX_RECORDING: Duration = Duration::from_secs(10 * 60);
 /// How often the recording is checked for a finished segment (sooner = typed sooner while
@@ -208,7 +210,7 @@ struct App {
     /// Windows: the last hold was ended by the app, its release unseen (`check_talk_key`). If
     /// the user was in fact still holding the key, its auto-repeat comes as the next press:
     /// letting go of that one soon is the end of a hold, not a tap for hands-free.
-    after_hidden: bool,
+    after_hidden: Option<Instant>,
     /// This recording's press was that one (`after_hidden`): it can't turn hands-free.
     hold_only: bool,
     /// Checks in a row (POLL apart) that found the talk key up while the app thought it held
@@ -369,7 +371,7 @@ pub fn run() -> Result<()> {
         mic_silent: false,
         mics: Vec::new(),
         default_mic: String::new(),
-        after_hidden: false,
+        after_hidden: None,
         hold_only: false,
         key_up_seen: 0,
         key_down_seen: false,
@@ -1055,8 +1057,9 @@ impl App {
                 }
             }
             UserEvent::Delivered(generation, phase) => {
-                // Not over a newer recording's pill.
-                if generation == self.rec_gen && self.state == State::Idle {
+                // Not over a newer recording's pill (a newer one has another generation; Recent
+                // pasted while recording or transcribing has this one).
+                if generation == self.rec_gen && !matches!(self.state, State::Recording | State::Transcribing) {
                     self.overlay.set(phase);
                 }
             }
@@ -1249,7 +1252,9 @@ impl App {
     fn on_hotkey(&mut self, h: HotkeyEvent, at: Instant) {
         match h {
             HotkeyEvent::TalkDown => {
-                let after_hidden = std::mem::take(&mut self.after_hidden);
+                // Only soon after: the repeats come as soon as the hook sees the keyboard again;
+                // a press much later is a new one, and may be a tap for hands-free.
+                let after_hidden = self.after_hidden.take().is_some_and(|t| t.elapsed() < AFTER_HIDDEN);
                 // Not set up yet: ask for what's missing instead of recording.
                 if !self.busy() {
                     if self.cfg.backend == Backend::Lambda
@@ -1500,7 +1505,7 @@ impl App {
             self.key_up_seen = 0;
             if !seen_up {
                 platform::forget_talk_key();
-                self.after_hidden = true;
+                self.after_hidden = Some(Instant::now());
             }
             self.on_hotkey(HotkeyEvent::TalkUp, Instant::now());
         }

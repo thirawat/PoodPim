@@ -117,6 +117,9 @@ impl LiveTyper {
                     }
                 }
                 sleep(Duration::from_millis(30));
+                if stop.load(SeqCst) {
+                    break; // Esc meanwhile
+                }
                 if !crate::platform::send_paste(Some(window)) {
                     eprintln!("live typing: a part couldn't be pasted: it and the rest are copied at the end");
                     left = text;

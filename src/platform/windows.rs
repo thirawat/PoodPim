@@ -61,14 +61,18 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                     continue;
                 }
                 let now = std::time::SystemTime::now();
-                woke |= now.duration_since(last_tick).is_ok_and(|d| d.as_millis() > 3 * u128::from(TICK_MS));
+                let just_woke = now.duration_since(last_tick).is_ok_and(|d| d.as_millis() > 3 * u128::from(TICK_MS));
                 last_tick = now;
-                if woke && !super::listening() {
-                    // A key held when the PC went to sleep was let go while the hook couldn't
-                    // see it; left as down, it would keep the hook from being put in again.
-                    TALK_DOWN.store(false, Ordering::SeqCst);
+                if just_woke {
+                    // No key is held through sleep: one the hook still takes as down was let go
+                    // unseen. Its release ends the hold (a dictation would record on), and the
+                    // hook can be put in again (that waits for the keys to be up).
+                    if TALK_DOWN.swap(false, Ordering::SeqCst) {
+                        sink(HotkeyEvent::TalkUp);
+                    }
                     ESC_DOWN.store(false, Ordering::SeqCst);
                 }
+                woke |= just_woke;
                 let idle = !TALK_DOWN.load(Ordering::SeqCst) && !ESC_DOWN.load(Ordering::SeqCst) && !super::listening();
                 if idle
                     && (woke || hooked_at.elapsed() >= REHOOK_EVERY)
@@ -216,15 +220,14 @@ pub fn send_paste(target: Option<u64>) -> bool {
     }
     let keys = [(VK_CONTROL, true), (VK_V, true), (VK_V, false), (VK_CONTROL, false)];
     let sent = send_keys(&keys);
-    if sent != keys.len() {
-        // Some went: don't leave Ctrl or V down.
-        if sent > 0 {
-            send_keys(&[(VK_V, false), (VK_CONTROL, false)]);
-        }
+    if sent < keys.len() && sent > 0 {
+        send_keys(&[(VK_V, false), (VK_CONTROL, false)]); // don't leave Ctrl or V down
+    }
+    if sent < 2 {
         eprintln!("Windows took {sent} of the paste keys: copied instead of pasting");
         return false;
     }
-    true
+    true // Ctrl and V went down: it pasted (copying it as well would paste it twice)
 }
 
 /// The window in front, to tell whether the user switched windows while text was being typed.
