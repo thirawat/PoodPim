@@ -26,6 +26,9 @@ static SINK: OnceLock<HotkeySink> = OnceLock::new();
 static TALK_DOWN: AtomicBool = AtomicBool::new(false);
 /// Presses of the talk key so far (to tell a press from before sleep from a new one).
 static TALK_PRESSES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// When the talk key last came down, its auto-repeats included (the hook's ms clock): a key
+/// really held keeps repeating (at the slowest setting every ~400 ms, after at most 1 s).
+static TALK_SEEN_AT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 const VK_V: VIRTUAL_KEY = VIRTUAL_KEY(0x56);
 /// Scan code of the Left Ctrl that Windows makes up in front of AltGr.
 const ALTGR_FAKE_CTRL_SCAN: u32 = 0x21D;
@@ -58,6 +61,8 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
             // Woke up while a key was held: put in once the keys are up.
             let mut woke = false;
             let mut presses_at_tick = TALK_PRESSES.load(Ordering::SeqCst);
+            // The last tick was a wake with a press since the tick before sleep: before or after?
+            let mut unsure = false;
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 if msg.message != WM_TIMER {
@@ -67,10 +72,17 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                 let just_woke = now.duration_since(last_tick).is_ok_and(|d| d.as_millis() > 3 * u128::from(TICK_MS));
                 last_tick = now;
                 // The talk key was pressed before the last tick before sleep (no press since):
-                // no key is held through sleep, so it was let go unseen. A press after waking,
-                // before this tick, is a new one and stays.
-                let stale = just_woke && TALK_PRESSES.load(Ordering::SeqCst) == presses_at_tick;
-                presses_at_tick = TALK_PRESSES.load(Ordering::SeqCst);
+                // no key is held through sleep, so it was let go unseen. A press between that
+                // tick and the wake could be either side of the sleep, so it stays for now; if it
+                // is still taken as down at the next tick with no press since and no auto-repeat
+                // lately, it was let go in the sleep too. (Held, it would still be repeating.)
+                let presses = TALK_PRESSES.load(Ordering::SeqCst);
+                let no_new_press = presses == presses_at_tick;
+                presses_at_tick = presses;
+                // (Signed: a repeat stamped a few ms after the timer counts as recent too.)
+                let repeating = (msg.time.wrapping_sub(TALK_SEEN_AT.load(Ordering::SeqCst)) as i32) < 1500;
+                let stale = no_new_press && (just_woke || (unsure && !repeating));
+                unsure = just_woke && !no_new_press;
                 if stale && TALK_DOWN.swap(false, Ordering::SeqCst) {
                     sink(HotkeyEvent::TalkUp); // ends the hold (a dictation would record on)
                 }
@@ -107,6 +119,9 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
         if let (false, Some(sink)) = (injected, SINK.get()) {
             if kb.vkCode == VK_RMENU.0 as u32 {
+                if is_down {
+                    TALK_SEEN_AT.store(kb.time, Ordering::SeqCst);
+                }
                 if is_down && !TALK_DOWN.swap(true, Ordering::SeqCst) {
                     TALK_PRESSES.fetch_add(1, Ordering::SeqCst);
                     sink(HotkeyEvent::TalkDown);
@@ -222,7 +237,8 @@ pub fn ready_to_paste(target: Option<u64>) -> bool {
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    if held() || focused_window() != window {
+    // 0: no window in front (a moment during a switch, or another desktop): nobody to paste to.
+    if held() || window == 0 || focused_window() != window {
         eprintln!("a key is still held or another window is in front: copied instead of pasting");
         return false;
     }

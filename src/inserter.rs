@@ -19,23 +19,36 @@ const READ_TIME: Duration = Duration::from_millis(400);
 /// as "the previous clipboard" and put that back instead of the user's.
 static PASTING: Mutex<()> = Mutex::new(());
 
-/// Pastes `text`. `restore`: put the previous clipboard back afterwards. Ok(false): the paste
+/// Pastes `text` into `window` (`platform::focused_window`, asked on the main thread when the
+/// text was ready). `restore`: put the previous clipboard back afterwards. Ok(false): the paste
 /// key couldn't be sent (see `platform::send_paste`), so `text` was left on the clipboard for
 /// the user to paste.
-pub fn paste_text(text: &str, restore: bool) -> Result<bool> {
+pub fn paste_text(text: &str, restore: bool, window: u64) -> Result<bool> {
     if text.is_empty() {
         return Ok(true);
     }
     let _one_at_a_time = PASTING.lock().unwrap_or_else(|e| e.into_inner());
-    if !crate::platform::ready_to_paste(None) {
+    if !crate::platform::ready_to_paste(Some(window)) {
+        eprintln!("paste: a modifier key is held, another window is in front or the app can't send keys: copied instead");
         sys::put(text, false)?; // to stay, not hidden from clipboard managers
         return Ok(false);
     }
     let saved = if restore { Some(sys::save()) } else { None };
     let ours = sys::put(text, restore)?;
     sleep(Duration::from_millis(30));
-    // Something else copied in these 30 ms: ⌘V would paste that instead.
-    if sys::change_count() != ours || !crate::platform::send_paste() {
+    // Asked again right before the keys: a window switch or a modifier pressed in these 30 ms.
+    if !crate::platform::ready_to_paste(Some(window)) {
+        eprintln!("paste: the window or the keys held changed just before pasting: copied instead");
+        sys::put(text, false)?;
+        return Ok(false);
+    }
+    // Something else copied meanwhile: ⌘V would paste that instead.
+    if sys::change_count() != ours {
+        eprintln!("paste: something else changed the clipboard just before pasting: copied instead");
+        sys::put(text, false)?;
+        return Ok(false);
+    }
+    if !crate::platform::send_paste() {
         sys::put(text, false)?;
         return Ok(false);
     }
@@ -133,7 +146,16 @@ impl LiveTyper {
                 if stop.load(SeqCst) {
                     break; // Esc meanwhile
                 }
-                if ours.is_some_and(|o| sys::change_count() != o) || !crate::platform::send_paste() {
+                // Asked again right before the keys (a window switch or a modifier pressed in these
+                // 30 ms), then whether the clipboard still holds this part.
+                let ready = crate::platform::ready_to_paste(Some(window));
+                if stop.load(SeqCst) {
+                    break; // Esc while waiting
+                }
+                if !ready
+                    || ours.is_some_and(|o| sys::change_count() != o)
+                    || !crate::platform::send_paste()
+                {
                     eprintln!("live typing: a part couldn't be pasted: it and the rest are copied at the end");
                     left = text;
                     continue;

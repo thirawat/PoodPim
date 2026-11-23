@@ -1730,7 +1730,8 @@ impl App {
             };
         }
         let (restore, p, generation) = (self.cfg.restore_clipboard, self.proxy.clone(), self.rec_gen);
-        std::thread::spawn(move || match inserter::paste_text(&text, restore) {
+        let window = platform::focused_window(); // here: on macOS it is current on the main thread
+        std::thread::spawn(move || match inserter::paste_text(&text, restore, window) {
             Ok(true) => {}
             Ok(false) => {
                 let _ = p.send_event(UserEvent::Delivered(generation, Phase::Copied { elevated: false }));
