@@ -24,6 +24,8 @@ use super::{HotkeyEvent, HotkeySink};
 
 static SINK: OnceLock<HotkeySink> = OnceLock::new();
 static TALK_DOWN: AtomicBool = AtomicBool::new(false);
+/// Presses of the talk key so far (to tell a press from before sleep from a new one).
+static TALK_PRESSES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 const VK_V: VIRTUAL_KEY = VIRTUAL_KEY(0x56);
 /// Scan code of the Left Ctrl that Windows makes up in front of AltGr.
 const ALTGR_FAKE_CTRL_SCAN: u32 = 0x21D;
@@ -53,8 +55,9 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
             const REHOOK_EVERY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
             SetTimer(None, 0, TICK_MS, None);
             let (mut last_tick, mut hooked_at) = (std::time::SystemTime::now(), std::time::Instant::now());
-            // Woke up while a key was held or dictation went on: put in at the next idle tick.
+            // Woke up while a key was held: put in once the keys are up.
             let mut woke = false;
+            let mut presses_at_tick = TALK_PRESSES.load(Ordering::SeqCst);
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 if msg.message != WM_TIMER {
@@ -63,19 +66,23 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                 let now = std::time::SystemTime::now();
                 let just_woke = now.duration_since(last_tick).is_ok_and(|d| d.as_millis() > 3 * u128::from(TICK_MS));
                 last_tick = now;
+                // The talk key was pressed before the last tick before sleep (no press since):
+                // no key is held through sleep, so it was let go unseen. A press after waking,
+                // before this tick, is a new one and stays.
+                let stale = just_woke && TALK_PRESSES.load(Ordering::SeqCst) == presses_at_tick;
+                presses_at_tick = TALK_PRESSES.load(Ordering::SeqCst);
+                if stale && TALK_DOWN.swap(false, Ordering::SeqCst) {
+                    sink(HotkeyEvent::TalkUp); // ends the hold (a dictation would record on)
+                }
                 if just_woke {
-                    // No key is held through sleep: one the hook still takes as down was let go
-                    // unseen. Its release ends the hold (a dictation would record on), and the
-                    // hook can be put in again (that waits for the keys to be up).
-                    if TALK_DOWN.swap(false, Ordering::SeqCst) {
-                        sink(HotkeyEvent::TalkUp);
-                    }
                     ESC_DOWN.store(false, Ordering::SeqCst);
                 }
                 woke |= just_woke;
-                let idle = !TALK_DOWN.load(Ordering::SeqCst) && !ESC_DOWN.load(Ordering::SeqCst) && !super::listening();
-                if idle
-                    && (woke || hooked_at.elapsed() >= REHOOK_EVERY)
+                // After waking also while listening (hands-free: with a dead hook neither the
+                // talk key nor Esc could end it); the regular one only when idle.
+                let keys_up = !TALK_DOWN.load(Ordering::SeqCst) && !ESC_DOWN.load(Ordering::SeqCst);
+                if keys_up
+                    && (woke || (hooked_at.elapsed() >= REHOOK_EVERY && !super::listening()))
                     && let Some(new) = install()
                 {
                     if let Some(old) = hook.replace(new) {
@@ -101,6 +108,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         if let (false, Some(sink)) = (injected, SINK.get()) {
             if kb.vkCode == VK_RMENU.0 as u32 {
                 if is_down && !TALK_DOWN.swap(true, Ordering::SeqCst) {
+                    TALK_PRESSES.fetch_add(1, Ordering::SeqCst);
                     sink(HotkeyEvent::TalkDown);
                 } else if is_up && TALK_DOWN.swap(false, Ordering::SeqCst) {
                     sink(HotkeyEvent::TalkUp);
@@ -198,13 +206,13 @@ pub fn release_hidden() -> bool {
     other_desktop || foreground_is_elevated()
 }
 
-/// Presses Ctrl+V. False: it didn't, as a key the user holds would change it into another
-/// shortcut, or the window in front isn't `target` (live typing: the window its first part
-/// went to) or changed meanwhile (Alt+Tab), or Windows didn't take the keys.
-pub fn send_paste(target: Option<u64>) -> bool {
-    // A Shift, Alt or Windows key the user still holds would turn Ctrl+V into another shortcut
-    // (Handy #2051): wait for it to be let go, at most half a second. (Right Alt, the talk key,
-    // never reaches Windows.)
+/// Whether Ctrl+V can be sent now. A Shift, Alt or Windows key the user still holds would turn
+/// it into another shortcut (Handy #2051): this waits for it to be let go, at most half a
+/// second (before the text goes on the clipboard, so nothing copied meanwhile gets pasted).
+/// False if it is still held, or the window in front isn't `target` (live typing: the window
+/// its first part went to) or changed meanwhile (Alt+Tab). (Right Alt, the talk key, never
+/// reaches Windows.)
+pub fn ready_to_paste(target: Option<u64>) -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LMENU, VK_LWIN, VK_RWIN, VK_SHIFT};
     let held = || [VK_SHIFT, VK_LMENU, VK_LWIN, VK_RWIN].iter().any(|k| unsafe { GetAsyncKeyState(i32::from(k.0)) } < 0);
     let window = target.unwrap_or_else(focused_window);
@@ -218,6 +226,11 @@ pub fn send_paste(target: Option<u64>) -> bool {
         eprintln!("a key is still held or another window is in front: copied instead of pasting");
         return false;
     }
+    true
+}
+
+/// Presses Ctrl+V (after `ready_to_paste`). False: Windows took fewer than Ctrl and V down.
+pub fn send_paste() -> bool {
     let keys = [(VK_CONTROL, true), (VK_V, true), (VK_V, false), (VK_CONTROL, false)];
     let sent = send_keys(&keys);
     if sent < keys.len() && sent > 0 {

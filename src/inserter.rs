@@ -27,11 +27,16 @@ pub fn paste_text(text: &str, restore: bool) -> Result<bool> {
         return Ok(true);
     }
     let _one_at_a_time = PASTING.lock().unwrap_or_else(|e| e.into_inner());
+    if !crate::platform::ready_to_paste(None) {
+        sys::put(text, false)?; // to stay, not hidden from clipboard managers
+        return Ok(false);
+    }
     let saved = if restore { Some(sys::save()) } else { None };
     let ours = sys::put(text, restore)?;
     sleep(Duration::from_millis(30));
-    if !crate::platform::send_paste(None) {
-        sys::put(text, false)?; // to stay, not hidden from clipboard managers
+    // Something else copied in these 30 ms: ⌘V would paste that instead.
+    if sys::change_count() != ours || !crate::platform::send_paste() {
+        sys::put(text, false)?;
         return Ok(false);
     }
     if let Some(saved) = saved {
@@ -103,6 +108,14 @@ impl LiveTyper {
                     }
                 };
                 let _one_at_a_time = PASTING.lock().unwrap_or_else(|e| e.into_inner());
+                if !crate::platform::ready_to_paste(Some(window)) {
+                    eprintln!("live typing: a part couldn't be pasted: it and the rest are copied at the end");
+                    left = text;
+                    continue;
+                }
+                if stop.load(SeqCst) {
+                    break; // Esc while waiting
+                }
                 // First part, or the user copied something since the last one: that is what
                 // goes back at the end.
                 if restore && ours.is_none_or(|o| sys::change_count() != o) {
@@ -120,7 +133,7 @@ impl LiveTyper {
                 if stop.load(SeqCst) {
                     break; // Esc meanwhile
                 }
-                if !crate::platform::send_paste(Some(window)) {
+                if ours.is_some_and(|o| sys::change_count() != o) || !crate::platform::send_paste() {
                     eprintln!("live typing: a part couldn't be pasted: it and the rest are copied at the end");
                     left = text;
                     continue;

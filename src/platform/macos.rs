@@ -197,13 +197,15 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
         .expect("spawn hotkey thread");
 }
 
-/// Presses ⌘V. False: it couldn't (no Accessibility permission: macOS would drop the keys).
-/// `_target` (the app the text is for) isn't checked here: the frontmost app is only kept up
-/// to date on the main thread, which checks it before handing text over.
-pub fn send_paste(_target: Option<u64>) -> bool {
-    if !accessibility_trusted(false) {
-        return false;
-    }
+/// Whether ⌘V can be sent now: not without Accessibility permission (macOS would drop the
+/// keys). `_target` (the app the text is for) isn't checked here: the frontmost app is only
+/// kept up to date on the main thread, which checks it before handing text over.
+pub fn ready_to_paste(_target: Option<u64>) -> bool {
+    accessibility_trusted(false)
+}
+
+/// Presses ⌘V (after `ready_to_paste`). False: it couldn't.
+pub fn send_paste() -> bool {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::CombinedSessionState) else { return false };
     // Both made before either is posted: a ⌘V down without its up would leave V stuck.
     let (Ok(down), Ok(up)) =

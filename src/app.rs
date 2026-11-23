@@ -79,7 +79,8 @@ enum UserEvent {
     ModelWoke(u64, Result<Arc<Mutex<OpenThaiAsr>>, String>),
     Transcribed(u64, Outcome),
     /// Text of recording n couldn't be pasted (no Accessibility permission; Windows: a key
-    /// still held or another window in front) and was left on the clipboard: what the pill says.
+    /// still held or another window in front) and was left on the clipboard, or it failed:
+    /// what the pill says.
     Delivered(u64, Phase),
     /// One segment's text, as soon as it is transcribed (the recording may still go on).
     Part(u64, String),
@@ -1713,7 +1714,10 @@ impl App {
             Ok(false) => {
                 let _ = p.send_event(UserEvent::Delivered(generation, Phase::Copied { elevated: false }));
             }
-            Err(e) => eprintln!("paste error: {e:#}"),
+            Err(e) => {
+                eprintln!("paste error: {e:#}");
+                let _ = p.send_event(UserEvent::Delivered(generation, Phase::Failed));
+            }
         });
         Phase::Done
     }
