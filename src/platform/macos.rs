@@ -140,10 +140,15 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                                 CallbackResult::Keep
                             }
                             // Sent for our own CGEventTapEnable(false), which `capture_escape` makes
-                            // while idle: switching it off again here sent another one, and so on,
-                            // keeping this thread busy (about half a core) whenever dictation wasn't
-                            // listening (1.0.6, 1.0.7).
-                            CGEventType::TapDisabledByUserInput => CallbackResult::Keep,
+                            // while idle. Only back on if it should be: switching it off again here
+                            // sent another one, and so on, keeping this thread busy (about half a
+                            // core) whenever dictation wasn't listening (1.0.6, 1.0.7).
+                            CGEventType::TapDisabledByUserInput => {
+                                if super::listening() || ESC_HELD.load(Ordering::SeqCst) {
+                                    capture_escape();
+                                }
+                                CallbackResult::Keep
+                            }
                             CGEventType::KeyDown if key() == KEY_ESC => {
                                 let repeat = event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT) != 0;
                                 if repeat && ESC_HELD.load(Ordering::SeqCst) {
