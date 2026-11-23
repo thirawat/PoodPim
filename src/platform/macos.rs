@@ -259,6 +259,9 @@ pub fn release_hidden() -> bool {
     false
 }
 
+/// Windows only (the hook's idea of the key being down); the event tap keeps none.
+pub fn forget_talk_key() {}
+
 /// Windows only (an app run as administrator ignores PoodPim's ⌘V there); never on macOS.
 pub fn foreground_is_elevated() -> bool {
     false

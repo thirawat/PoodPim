@@ -1445,7 +1445,8 @@ impl App {
         self.key_down_seen |= down == Some(true);
         // macOS: the key itself says it is up. Windows: the hook can't see the keyboard now
         // (locked screen, UAC prompt, administrator window in front), so its release would be lost.
-        let up = (down == Some(false) && self.key_down_seen) || (holding && platform::release_hidden());
+        let seen_up = down == Some(false) && self.key_down_seen;
+        let up = seen_up || (holding && platform::release_hidden());
         if !up || self.pressed_at.elapsed() < Duration::from_millis(600) {
             self.key_up_seen = 0;
             return;
@@ -1456,6 +1457,9 @@ impl App {
         if self.key_up_seen >= 10 {
             eprintln!("the talk key is up but its release was missed: finishing");
             self.key_up_seen = 0;
+            if !seen_up {
+                platform::forget_talk_key();
+            }
             self.on_hotkey(HotkeyEvent::TalkUp, Instant::now());
         }
     }

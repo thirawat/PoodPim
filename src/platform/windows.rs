@@ -53,13 +53,15 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
             const REHOOK_EVERY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
             SetTimer(None, 0, TICK_MS, None);
             let (mut last_tick, mut hooked_at) = (std::time::SystemTime::now(), std::time::Instant::now());
+            // Woke up while a key was held or dictation went on: put in at the next idle tick.
+            let mut woke = false;
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 if msg.message != WM_TIMER {
                     continue;
                 }
                 let now = std::time::SystemTime::now();
-                let woke = now.duration_since(last_tick).is_ok_and(|d| d.as_millis() > 3 * u128::from(TICK_MS));
+                woke |= now.duration_since(last_tick).is_ok_and(|d| d.as_millis() > 3 * u128::from(TICK_MS));
                 last_tick = now;
                 let idle = !TALK_DOWN.load(Ordering::SeqCst) && !ESC_DOWN.load(Ordering::SeqCst) && !super::listening();
                 if idle
@@ -70,7 +72,7 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                         let _ = UnhookWindowsHookEx(old);
                     }
                     hooked_at = std::time::Instant::now();
-                    if woke {
+                    if std::mem::take(&mut woke) {
                         eprintln!("keyboard hook put in again after the PC woke up");
                     }
                 }
@@ -162,6 +164,14 @@ static ESC_DOWN_AT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 /// nothing to check against (unlike macOS).
 pub fn talk_key_down() -> Option<bool> {
     None
+}
+
+/// The app ended a hold whose release the hook couldn't see (`release_hidden`): the hook stops
+/// taking the key as down, or it would ignore the next press (and never be put in again, as
+/// that waits for the key to be up). If the user was in fact still holding it, the key's
+/// auto-repeat starts a new dictation, so what they say next isn't lost either.
+pub fn forget_talk_key() {
+    TALK_DOWN.store(false, Ordering::SeqCst);
 }
 
 /// Whether the hook can't see the keyboard now, so a release of the talk key would be missed:
