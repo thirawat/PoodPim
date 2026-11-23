@@ -115,12 +115,14 @@ impl Recorder {
 /// The microphones there are: (id, name), in the system's order.
 pub fn microphones() -> Vec<(String, String)> {
     let Ok(devices) = cpal::default_host().input_devices() else { return Vec::new() };
-    devices.filter_map(|d| Some((d.id().ok()?.to_string(), d.to_string()))).collect()
+    // (Not `Device`'s Display: it fails, and to_string() panics, for a device that went away
+    // while listed. Such a one is left out.)
+    devices.filter_map(|d| Some((d.id().ok()?.to_string(), d.description().ok()?.name().to_string()))).collect()
 }
 
 /// The name of the system's default microphone.
 pub fn default_microphone() -> Option<String> {
-    cpal::default_host().default_input_device().map(|d| d.to_string())
+    Some(cpal::default_host().default_input_device()?.description().ok()?.name().to_string())
 }
 
 /// The microphone `id` (from `microphones`), or the system default when `id` is empty or that

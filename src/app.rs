@@ -200,6 +200,8 @@ struct App {
     mic_silent: bool,
     /// Microphones for the Settings page: (id, name), read when it opens.
     mics: Vec<(String, String)>,
+    /// The system's default microphone's name, looked up with `mics` (not on every loop pass).
+    default_mic: String,
     /// Checks in a row (POLL apart) that found the talk key up while the app thought it held
     /// (`check_talk_key`).
     key_up_seen: u32,
@@ -357,6 +359,7 @@ pub fn run() -> Result<()> {
         mic_lost: false,
         mic_silent: false,
         mics: Vec::new(),
+        default_mic: String::new(),
         key_up_seen: 0,
         key_down_seen: false,
         secure_seen: false,
@@ -1733,7 +1736,7 @@ impl App {
             "copyOnly": self.cfg.copy_only,
             "mics": self.mics,
             "mic": self.cfg.microphone,
-            "defaultMic": crate::audio::default_microphone().unwrap_or_default(),
+            "defaultMic": self.default_mic,
             "unload": self.cfg.unload_when_idle,
             "live": self.cfg.live_typing,
             "preview": self.cfg.live_preview,
@@ -1746,6 +1749,11 @@ impl App {
             "updates": update::supported(),
         })
         .to_string()
+    }
+
+    fn refresh_mics(&mut self) {
+        self.mics = crate::audio::microphones();
+        self.default_mic = crate::audio::default_microphone().unwrap_or_default();
     }
 
     fn show_settings_state(&mut self) {
@@ -1770,7 +1778,7 @@ impl App {
         eprintln!("settings: {} {}", v["cmd"].as_str().unwrap_or("?"), v["key"].as_str().unwrap_or(""));
         match v["cmd"].as_str().unwrap_or("") {
             "mics" => {
-                self.mics = crate::audio::microphones();
+                self.refresh_mics();
                 if let Some(w) = &mut self.settings {
                     w.forget_state();
                 }
@@ -1782,7 +1790,7 @@ impl App {
                 Recorder::warm_up(self.cfg.microphone.clone());
             }
             "ready" => {
-                self.mics = crate::audio::microphones();
+                self.refresh_mics();
                 self.reload_vocabulary();
                 if let Some(w) = &mut self.settings {
                     w.forget_state();
