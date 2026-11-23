@@ -30,11 +30,12 @@ pub struct Outcome {
 }
 
 /// Joins the texts of consecutive segments: a cut is at a pause, which Thai writes as a space,
-/// except before an ending particle (as inside a segment, see asr::starts_with_particle).
+/// except before an ending particle (as inside a segment, see asr::starts_with_particle) and
+/// next to a new line (a correction such as `ขึ้นบรรทัดใหม่ = \n`).
 pub fn join_parts<S: AsRef<str>>(parts: &[S]) -> String {
     let mut out = String::new();
     for p in parts.iter().map(AsRef::as_ref).filter(|p| !p.is_empty()) {
-        if !out.is_empty() && !crate::asr::starts_with_particle(p) {
+        if !out.is_empty() && !crate::asr::starts_with_particle(p) && !out.ends_with('\n') && !p.starts_with('\n') {
             out.push(' ');
         }
         out.push_str(p);
@@ -125,5 +126,17 @@ impl Pipeline {
     pub fn cancel(mut self) {
         self.cancelled.store(true, Ordering::SeqCst);
         self.tx = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::join_parts;
+
+    #[test]
+    fn no_space_next_to_a_new_line() {
+        assert_eq!(join_parts(&["สวัสดี", "\n", "ครับผม"]), "สวัสดี\nครับผม");
+        assert_eq!(join_parts(&["หนึ่ง\n", "สอง"]), "หนึ่ง\nสอง");
+        assert_eq!(join_parts(&["หนึ่ง", "สอง"]), "หนึ่ง สอง");
     }
 }

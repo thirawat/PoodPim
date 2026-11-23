@@ -914,7 +914,7 @@ impl App {
                     });
                 }
                 if self.mic_lost {
-                    self.status_text = "The microphone stopped sending sound: check it, or pick another one in the system settings".into();
+                    self.status_text = "The microphone stopped sending sound: check it, or pick another one in Settings › Microphone".into();
                 }
             }
             UserEvent::UpdateFound(tag) => {
@@ -1981,8 +1981,12 @@ fn edit_menu() -> Menu {
 /// A message box that doesn't block the event loop.
 /// `next` as typed after the parts already typed: with the space `join_parts` would put there.
 fn continuation(typed: &[String], next: &str) -> String {
-    let after_text = typed.iter().any(|t| !t.is_empty());
-    if after_text && !next.is_empty() && !crate::asr::starts_with_particle(next) { format!(" {next}") } else { next.to_string() }
+    let before = typed.iter().rfind(|t| !t.is_empty());
+    let space = before.is_some_and(|b| !b.ends_with('\n'))
+        && !next.is_empty()
+        && !next.starts_with('\n')
+        && !crate::asr::starts_with_particle(next);
+    if space { format!(" {next}") } else { next.to_string() }
 }
 
 fn show_alert(message: String) {
