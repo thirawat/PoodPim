@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use core_foundation::base::TCFType;
 use core_foundation::boolean::CFBoolean;
@@ -13,7 +13,7 @@ use core_graphics::event::{
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
-use super::{HotkeyEvent, HotkeySink};
+use super::{HotkeyEvent, HotkeySink, TypingGuard};
 
 const KEY_RIGHT_OPTION: i64 = 61;
 const KEY_ESC: i64 = 53;
@@ -56,6 +56,7 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
         .name("hotkey".into())
         .spawn(move || {
             let mut warned = false;
+            let our_pid = i64::from(std::process::id());
             loop {
                 // A tap can be created without Accessibility yet receive nothing, so wait for it.
                 if !accessibility_trusted(false) {
@@ -68,6 +69,7 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                 }
                 let disabled = Arc::new(AtomicBool::new(false));
                 let (s, d) = (sink.clone(), disabled.clone());
+                let guard = std::sync::Mutex::new(TypingGuard::default());
                 let tap = CGEventTap::new(
                     CGEventTapLocation::Session,
                     CGEventTapPlacement::HeadInsertEventTap,
@@ -81,7 +83,21 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                             CGEventType::FlagsChanged => {
                                 if event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) == KEY_RIGHT_OPTION {
                                     let down = event.get_flags().bits() & NX_DEVICERALTKEYMASK != 0;
+                                    guard.lock().unwrap_or_else(|e| e.into_inner()).talk_key(down, Instant::now());
                                     s(if down { HotkeyEvent::TalkDown } else { HotkeyEvent::TalkUp });
+                                }
+                            }
+                            // Another key right after the talk key, with Right ⌥ still down: typing
+                            // ⌥E, not dictating. (Not a key after a missed ⌥ release, nor our own
+                            // ⌘V or live typing, which this process posts.)
+                            CGEventType::KeyDown
+                                if event.get_flags().bits() & NX_DEVICERALTKEYMASK != 0
+                                    && event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) != KEY_ESC
+                                    && event.get_integer_value_field(EventField::EVENT_SOURCE_UNIX_PROCESS_ID) != our_pid =>
+                            {
+                                let repeat = event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT) != 0;
+                                if guard.lock().unwrap_or_else(|e| e.into_inner()).other_key(repeat, Instant::now()) {
+                                    s(HotkeyEvent::TalkAborted);
                                 }
                             }
                             // Without the Esc tap (not made, or not yet), Esc is reported from here.

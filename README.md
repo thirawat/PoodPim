@@ -83,6 +83,9 @@ is still being transcribed (e.g. during a serverless cold start) starts nothing,
 says to wait.
 Dictating into a password field works, but while macOS Secure Input is on the pill doesn't
 show the words, and the text isn't kept for "Paste last transcript" or Recent.
+On macOS Right ⌥ still reaches the app you're in, so it also types symbols and moves the
+cursor (⌥E for an accent, ⌥← to jump a word). If another key goes down while Right ⌥ is held, within
+0.5 s of pressing it, the recording that press started is dropped instead of turning hands-free.
 Its menu keeps the everyday actions: paste last transcript, **Recent** (the last 10
 transcripts, kept in memory only, each with Paste and "Fix a word…", which opens "Add
 correction…" filled with that transcript), Add correction…, and **Settings…**. "Open
