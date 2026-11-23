@@ -197,8 +197,12 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
         .expect("spawn hotkey thread");
 }
 
-pub fn send_paste() {
-    let Ok(src) = CGEventSource::new(CGEventSourceStateID::CombinedSessionState) else { return };
+/// Presses ⌘V. False: it couldn't (no Accessibility permission: macOS would drop the keys).
+pub fn send_paste() -> bool {
+    if !accessibility_trusted(false) {
+        return false;
+    }
+    let Ok(src) = CGEventSource::new(CGEventSourceStateID::CombinedSessionState) else { return false };
     for down in [true, false] {
         if let Ok(ev) = CGEvent::new_keyboard_event(src.clone(), KEY_V, down) {
             ev.set_flags(CGEventFlags::CGEventFlagCommand);
@@ -206,6 +210,7 @@ pub fn send_paste() {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+    true
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]

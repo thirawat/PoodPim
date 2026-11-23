@@ -76,6 +76,9 @@ enum UserEvent {
     /// The model freed when idle was loaded again for a recording (see `asleep`).
     ModelWoke(u64, Result<Arc<Mutex<OpenThaiAsr>>, String>),
     Transcribed(u64, Outcome),
+    /// The paste key couldn't be sent (no Accessibility permission; Windows: a key still held
+    /// or another window in front), so the text was left on the clipboard.
+    PasteSkipped,
     /// One segment's text, as soon as it is transcribed (the recording may still go on).
     Part(u64, String),
     /// What the unfinished part (the n-th of the recording, from 0) sounds like so far;
@@ -878,22 +881,22 @@ impl App {
                         self.recent.truncate(RECENT);
                         self.recent_dirty = true;
                     }
+                    // Checked again for the end: copy-only turned on or Accessibility taken away since.
+                    let deliver = !self.cfg.copy_only && platform::accessibility_trusted(false);
                     let phase = match typer {
                         Some(_) if rest.is_empty() => Phase::Done,
-                        Some((typer, window)) if platform::focused_window() == window && !platform::foreground_is_elevated() => {
+                        Some((typer, window))
+                            if deliver && platform::focused_window() == window && !platform::foreground_is_elevated() =>
+                        {
                             typer.type_text(continuation(&typed, &rest));
                             Phase::Done
                         }
                         Some((typer, _)) => {
-                            eprintln!("the focused window changed while typing: copied the rest");
-                            typer.finish();
-                            match inserter::copy_text(&rest) {
-                                Ok(()) => Phase::Copied { elevated: platform::foreground_is_elevated() },
-                                Err(e) => {
-                                    eprintln!("copy error: {e:#}");
-                                    Phase::Failed
-                                }
-                            }
+                            eprintln!("can't paste the rest where the first parts went: copied it");
+                            // By the typer, after its queued parts: its own clipboard changes come
+                            // first and can't put back the old clipboard over the copy.
+                            typer.finish_copying(continuation(&typed, &rest));
+                            Phase::Copied { elevated: deliver && platform::foreground_is_elevated() }
                         }
                         None => self.paste(rest),
                     };
@@ -1040,6 +1043,7 @@ impl App {
                     self.show_heard();
                 }
             }
+            UserEvent::PasteSkipped => self.overlay.set(Phase::Copied { elevated: false }),
             UserEvent::DecoderInt8(r) => match r {
                 Ok(()) => {
                     eprintln!("downloaded the int8 decoder: switching to it");
@@ -1327,6 +1331,12 @@ impl App {
             HotkeyEvent::PermissionMissing => {
                 eprintln!("Cannot watch the keyboard yet: grant Accessibility permission");
                 self.needs_permission = true;
+                // Taken away while dictating: neither the talk key nor Esc could end it now.
+                if self.state == State::Recording {
+                    eprintln!("finishing the recording: it could not be stopped from the keyboard");
+                    self.handsfree = false;
+                    self.finish();
+                }
             }
             HotkeyEvent::Ready => {
                 eprintln!("watching the {TALK_KEY_LABEL} key");
@@ -1408,8 +1418,11 @@ impl App {
             eprintln!("the focused window changed: the rest waits for the end");
             return;
         }
-        let restore = self.cfg.restore_clipboard;
-        let (typer, _) = self.typer.get_or_insert_with(|| (inserter::LiveTyper::start(restore), window));
+        let (restore, p) = (self.cfg.restore_clipboard, self.proxy.clone());
+        let copied = move || {
+            let _ = p.send_event(UserEvent::PasteSkipped);
+        };
+        let (typer, _) = self.typer.get_or_insert_with(|| (inserter::LiveTyper::start(restore, copied), window));
         typer.type_text(continuation(&self.typed, &text));
         self.typed.push(text);
     }
@@ -1663,11 +1676,13 @@ impl App {
                 }
             };
         }
-        let restore = self.cfg.restore_clipboard;
-        std::thread::spawn(move || {
-            if let Err(e) = inserter::paste_text(&text, restore) {
-                eprintln!("paste error: {e:#}");
+        let (restore, p) = (self.cfg.restore_clipboard, self.proxy.clone());
+        std::thread::spawn(move || match inserter::paste_text(&text, restore) {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = p.send_event(UserEvent::PasteSkipped);
             }
+            Err(e) => eprintln!("paste error: {e:#}"),
         });
         Phase::Done
     }

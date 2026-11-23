@@ -19,23 +19,28 @@ const READ_TIME: Duration = Duration::from_millis(400);
 /// as "the previous clipboard" and put that back instead of the user's.
 static PASTING: Mutex<()> = Mutex::new(());
 
-/// Pastes `text`. `restore`: put the previous clipboard back afterwards.
-pub fn paste_text(text: &str, restore: bool) -> Result<()> {
+/// Pastes `text`. `restore`: put the previous clipboard back afterwards. Ok(false): the paste
+/// key couldn't be sent (see `platform::send_paste`), so `text` was left on the clipboard for
+/// the user to paste.
+pub fn paste_text(text: &str, restore: bool) -> Result<bool> {
     if text.is_empty() {
-        return Ok(());
+        return Ok(true);
     }
     let _one_at_a_time = PASTING.lock().unwrap_or_else(|e| e.into_inner());
     let saved = if restore { Some(sys::save()) } else { None };
     let ours = sys::put(text, restore)?;
     sleep(Duration::from_millis(30));
-    crate::platform::send_paste();
+    if !crate::platform::send_paste() {
+        sys::put(text, false)?; // to stay, not hidden from clipboard managers
+        return Ok(false);
+    }
     if let Some(saved) = saved {
         sleep(READ_TIME);
         if !sys::restore(saved, ours)? {
             eprintln!("clipboard changed while pasting: not restored");
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Puts `text` on the clipboard to stay there (the user pastes it with ⌘V / Ctrl+V).
@@ -47,18 +52,35 @@ pub fn copy_text(text: &str) -> Result<()> {
 /// Types the parts of one dictation while the user is still speaking, in order, on its own
 /// thread. The clipboard is saved before the first part and put back after the last one (not
 /// around every part: something the user copies between two parts would otherwise be lost).
+/// A part whose paste key can't be sent, and every part after it, is copied instead: once the
+/// queued parts are done, as the thread's last clipboard change, so nothing undoes it.
 pub struct LiveTyper {
-    tx: std::sync::mpsc::Sender<String>,
+    tx: std::sync::mpsc::Sender<Part>,
+}
+
+enum Part {
+    Paste(String),
+    /// The end of the dictation, for the user to paste (the window changed, copy-only…).
+    Copy(String),
 }
 
 impl LiveTyper {
-    /// `restore`: put the previous clipboard back once `finish` is called.
-    pub fn start(restore: bool) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel::<String>();
+    /// `restore`: put the previous clipboard back once `finish` is called. `copied`: called
+    /// at the end if some of the text was copied rather than pasted.
+    pub fn start(restore: bool, copied: impl FnOnce() + Send + 'static) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<Part>();
         std::thread::spawn(move || {
             let mut saved = None;
             let mut ours = None;
-            for text in rx {
+            let mut left = String::new(); // to copy at the end
+            for part in rx {
+                let text = match part {
+                    Part::Paste(t) if left.is_empty() => t,
+                    Part::Paste(t) | Part::Copy(t) => {
+                        left.push_str(&t);
+                        continue;
+                    }
+                };
                 let _one_at_a_time = PASTING.lock().unwrap_or_else(|e| e.into_inner());
                 // First part, or the user copied something since the last one: that is what
                 // goes back at the end.
@@ -73,11 +95,22 @@ impl LiveTyper {
                     }
                 }
                 sleep(Duration::from_millis(30));
-                crate::platform::send_paste();
+                if !crate::platform::send_paste() {
+                    left = text;
+                    continue;
+                }
                 sleep(READ_TIME); // before the clipboard changes again
             }
-            if let (Some(saved), Some(ours)) = (saved, ours) {
-                let _one_at_a_time = PASTING.lock().unwrap_or_else(|e| e.into_inner());
+            let _one_at_a_time = PASTING.lock().unwrap_or_else(|e| e.into_inner());
+            if !left.is_empty() {
+                match sys::put(left.trim_start(), false) {
+                    Ok(_) => {
+                        eprintln!("live typing: the rest couldn't be pasted: copied");
+                        copied();
+                    }
+                    Err(e) => eprintln!("live typing: copying the rest: {e:#}"),
+                }
+            } else if let (Some(saved), Some(ours)) = (saved, ours) {
                 match sys::restore(saved, ours) {
                     Ok(true) => {}
                     Ok(false) => eprintln!("clipboard changed while pasting: not restored"),
@@ -91,12 +124,17 @@ impl LiveTyper {
     /// Queues `text` to be pasted after the parts before it.
     pub fn type_text(&self, text: String) {
         if !text.is_empty() {
-            let _ = self.tx.send(text);
+            let _ = self.tx.send(Part::Paste(text));
         }
     }
 
     /// No more parts: the clipboard is put back after the queued ones are pasted.
     pub fn finish(self) {}
+
+    /// No more parts, and `text` (the end) is copied rather than pasted, after the queued ones.
+    pub fn finish_copying(self, text: String) {
+        let _ = self.tx.send(Part::Copy(text));
+    }
 }
 
 #[cfg(target_os = "macos")]
