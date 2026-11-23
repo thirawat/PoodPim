@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use core_foundation::base::TCFType;
 use core_foundation::boolean::CFBoolean;
@@ -13,7 +13,7 @@ use core_graphics::event::{
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
-use super::{HotkeyEvent, HotkeySink};
+use super::{HotkeyEvent, HotkeySink, TypingGuard};
 
 const KEY_RIGHT_OPTION: i64 = 61;
 const KEY_ESC: i64 = 53;
@@ -56,6 +56,7 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
         .name("hotkey".into())
         .spawn(move || {
             let mut warned = false;
+            let our_pid = i64::from(std::process::id());
             loop {
                 // A tap can be created without Accessibility yet receive nothing, so wait for it.
                 if !accessibility_trusted(false) {
@@ -68,6 +69,7 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                 }
                 let disabled = Arc::new(AtomicBool::new(false));
                 let (s, d) = (sink.clone(), disabled.clone());
+                let guard = std::sync::Mutex::new(TypingGuard::default());
                 let tap = CGEventTap::new(
                     CGEventTapLocation::Session,
                     CGEventTapPlacement::HeadInsertEventTap,
@@ -81,7 +83,21 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                             CGEventType::FlagsChanged => {
                                 if event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) == KEY_RIGHT_OPTION {
                                     let down = event.get_flags().bits() & NX_DEVICERALTKEYMASK != 0;
+                                    guard.lock().unwrap_or_else(|e| e.into_inner()).talk_key(down, Instant::now());
                                     s(if down { HotkeyEvent::TalkDown } else { HotkeyEvent::TalkUp });
+                                }
+                            }
+                            // Another key right after the talk key, with Right ⌥ still down: typing
+                            // ⌥E, not dictating. (Not a key after a missed ⌥ release, nor our own
+                            // ⌘V or live typing, which this process posts.)
+                            CGEventType::KeyDown
+                                if event.get_flags().bits() & NX_DEVICERALTKEYMASK != 0
+                                    && event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) != KEY_ESC
+                                    && event.get_integer_value_field(EventField::EVENT_SOURCE_UNIX_PROCESS_ID) != our_pid =>
+                            {
+                                let repeat = event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT) != 0;
+                                if guard.lock().unwrap_or_else(|e| e.into_inner()).other_key(repeat, Instant::now()) {
+                                    s(HotkeyEvent::TalkAborted);
                                 }
                             }
                             // Without the Esc tap (not made, or not yet), Esc is reported from here.
@@ -177,21 +193,48 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                     if disabled.swap(false, Ordering::SeqCst) {
                         tap.enable();
                     }
+                    // Accessibility taken away while running: the taps get nothing more (and one
+                    // that can drop events must not stay in the way of every key, Handy #1281).
+                    // Drop both, say so, and make them again once it is given back.
+                    if !accessibility_trusted(false) {
+                        eprintln!("Accessibility permission was taken away: waiting for it again");
+                        {
+                            let _switch = ESC_SWITCH.lock().unwrap_or_else(|e| e.into_inner());
+                            ESC_TAP.store(0, Ordering::SeqCst); // the tap goes away below
+                        }
+                        ESC_HELD.store(false, Ordering::SeqCst);
+                        sink(HotkeyEvent::PermissionMissing);
+                        warned = true;
+                        break; // dropping the taps invalidates them
+                    }
                 }
             }
         })
         .expect("spawn hotkey thread");
 }
 
-pub fn send_paste() {
-    let Ok(src) = CGEventSource::new(CGEventSourceStateID::CombinedSessionState) else { return };
-    for down in [true, false] {
-        if let Ok(ev) = CGEvent::new_keyboard_event(src.clone(), KEY_V, down) {
-            ev.set_flags(CGEventFlags::CGEventFlagCommand);
-            ev.post(CGEventTapLocation::HID);
-        }
+/// Whether ⌘V can be sent now: not without Accessibility permission (macOS would drop the
+/// keys). `_target` (the app the text is for) isn't checked here: the frontmost app is only
+/// kept up to date on the main thread, which checks it before handing text over.
+pub fn ready_to_paste(_target: Option<u64>) -> bool {
+    accessibility_trusted(false)
+}
+
+/// Presses ⌘V (after `ready_to_paste`). False: it couldn't.
+pub fn send_paste() -> bool {
+    let Ok(src) = CGEventSource::new(CGEventSourceStateID::CombinedSessionState) else { return false };
+    // Both made before either is posted: a ⌘V down without its up would leave V stuck.
+    let (Ok(down), Ok(up)) =
+        (CGEvent::new_keyboard_event(src.clone(), KEY_V, true), CGEvent::new_keyboard_event(src, KEY_V, false))
+    else {
+        return false;
+    };
+    for ev in [down, up] {
+        ev.set_flags(CGEventFlags::CGEventFlagCommand);
+        ev.post(CGEventTapLocation::HID);
         std::thread::sleep(Duration::from_millis(10));
     }
+    true
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -240,12 +283,21 @@ pub fn secure_input() -> bool {
     unsafe { IsSecureEventInputEnabled() }
 }
 
+/// Windows only (the hook can't see the keyboard); macOS checks the key itself (`talk_key_down`).
+pub fn release_hidden() -> bool {
+    false
+}
+
+/// Windows only (the hook's idea of the key being down); the event tap keeps none.
+pub fn forget_talk_key() {}
+
 /// Windows only (an app run as administrator ignores PoodPim's ⌘V there); never on macOS.
 pub fn foreground_is_elevated() -> bool {
     false
 }
 
 pub const TALK_KEY_LABEL: &str = "Right ⌥";
+pub const PASTE_KEY_LABEL: &str = "⌘V";
 
 /// Where the app's log goes when it isn't started from a terminal.
 pub fn log_dir() -> Option<std::path::PathBuf> {

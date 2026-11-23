@@ -32,6 +32,8 @@ use crate::hotwords::{self, Hotwords};
 use crate::{inserter, model, update};
 
 const TAP: Duration = Duration::from_millis(300);
+/// How long after a hold ended unseen (`App::after_hidden`) a press can't turn hands-free.
+const AFTER_HIDDEN: Duration = Duration::from_secs(30);
 /// Safety cap on one recording; it is finished automatically after this.
 const MAX_RECORDING: Duration = Duration::from_secs(10 * 60);
 /// How often the recording is checked for a finished segment (sooner = typed sooner while
@@ -76,6 +78,10 @@ enum UserEvent {
     /// The model freed when idle was loaded again for a recording (see `asleep`).
     ModelWoke(u64, Result<Arc<Mutex<OpenThaiAsr>>, String>),
     Transcribed(u64, Outcome),
+    /// Text of recording n couldn't be pasted (no Accessibility permission; Windows: a key
+    /// still held or another window in front) and was left on the clipboard, or it failed:
+    /// what the pill says.
+    Delivered(u64, Phase),
     /// One segment's text, as soon as it is transcribed (the recording may still go on).
     Part(u64, String),
     /// What the unfinished part (the n-th of the recording, from 0) sounds like so far;
@@ -148,6 +154,9 @@ struct App {
     load_gen: u64,
     recorder: Recorder,
     pressed_at: Instant,
+    /// The talk key is (or was last) pressed to start this recording, not to carry it on or
+    /// finish it: only such a press may drop it (HotkeyEvent::TalkAborted).
+    press_started: bool,
     /// The talk key was let go: finish the recording at this time (see TAIL).
     stop_at: Option<Instant>,
     handsfree: bool,
@@ -196,6 +205,18 @@ struct App {
     mic_len: usize,
     mic_seen: Instant,
     mic_lost: bool,
+    /// The last recording was all digital zeros: the microphone is muted (or the wrong one).
+    mic_silent: bool,
+    /// Microphones for the Settings page: (id, name), read when it opens.
+    mics: Vec<(String, String)>,
+    /// The system's default microphone's name, looked up with `mics` (not on every loop pass).
+    default_mic: String,
+    /// Windows: the last hold was ended by the app, its release unseen (`check_talk_key`). If
+    /// the user was in fact still holding the key, its auto-repeat comes as the next press:
+    /// letting go of that one soon is the end of a hold, not a tap for hands-free.
+    after_hidden: Option<Instant>,
+    /// This recording's press was that one (`after_hidden`): it can't turn hands-free.
+    hold_only: bool,
     /// Checks in a row (POLL apart) that found the talk key up while the app thought it held
     /// (`check_talk_key`).
     key_up_seen: u32,
@@ -323,6 +344,7 @@ pub fn run() -> Result<()> {
         load_gen: 0,
         recorder: Recorder::new(),
         pressed_at: Instant::now(),
+        press_started: false,
         stop_at: None,
         handsfree: false,
         last_text: String::new(),
@@ -351,6 +373,11 @@ pub fn run() -> Result<()> {
         mic_len: 0,
         mic_seen: Instant::now(),
         mic_lost: false,
+        mic_silent: false,
+        mics: Vec::new(),
+        default_mic: String::new(),
+        after_hidden: None,
+        hold_only: false,
         key_up_seen: 0,
         key_down_seen: false,
         secure_seen: false,
@@ -412,7 +439,7 @@ pub fn run() -> Result<()> {
                 app.apply_autostart();
                 // For testing the Settings window without the tray menu.
                 app.want_settings = std::env::var_os("POODPIM_OPEN_SETTINGS").is_some();
-                Recorder::warm_up();
+                Recorder::warm_up(app.cfg.microphone.clone());
                 app.start_backend();
                 // First launch in Local mode: ask about the model now, not on the first key press.
                 if app.state == State::NeedsModel {
@@ -451,8 +478,8 @@ pub fn run() -> Result<()> {
                     } else if let Some(k) = app.recent_ids.iter().position(|(p, f)| p == id || f == id) {
                         let text = app.recent[k].clone();
                         if app.recent_ids[k].0 == *id {
-                            if app.paste(text) == Phase::Copied {
-                                app.overlay.set(Phase::Copied);
+                            if let phase @ Phase::Copied { .. } = app.paste(text) {
+                                app.overlay.set(phase);
                             }
                         } else {
                             app.ask_correction(&text);
@@ -461,8 +488,8 @@ pub fn run() -> Result<()> {
                         let last = app.last_text.clone();
                         app.ask_correction(&last);
                     } else if id == ui.paste_last.id() {
-                        if app.paste(app.last_text.clone()) == Phase::Copied {
-                            app.overlay.set(Phase::Copied);
+                        if let phase @ Phase::Copied { .. } = app.paste(app.last_text.clone()) {
+                            app.overlay.set(phase);
                         }
                     } else if id == ui.download.id() {
                         app.start_download();
@@ -869,34 +896,43 @@ impl App {
                         self.recent.truncate(RECENT);
                         self.recent_dirty = true;
                     }
+                    // Checked again for the end: copy-only turned on or Accessibility taken away since.
+                    let deliver = !self.cfg.copy_only && platform::accessibility_trusted(false);
                     let phase = match typer {
                         Some(_) if rest.is_empty() => Phase::Done,
-                        Some((typer, window)) if platform::focused_window() == window && !platform::foreground_is_elevated() => {
+                        Some((typer, window))
+                            if deliver && platform::focused_window() == window && !platform::foreground_is_elevated() =>
+                        {
                             typer.type_text(continuation(&typed, &rest));
                             Phase::Done
                         }
                         Some((typer, _)) => {
-                            eprintln!("the focused window changed while typing: copied the rest");
-                            typer.finish();
-                            match inserter::copy_text(&rest) {
-                                Ok(()) => Phase::Copied,
-                                Err(e) => {
-                                    eprintln!("copy error: {e:#}");
-                                    Phase::Failed
-                                }
-                            }
+                            eprintln!("can't paste the rest where the first parts went: copied it");
+                            // By the typer, after its queued parts: its own clipboard changes come
+                            // first and can't put back the old clipboard over the copy. It says
+                            // when the copy is there (Delivered); till then the pill stays Working.
+                            typer.finish_copying(continuation(&typed, &rest), deliver && platform::foreground_is_elevated());
+                            Phase::Working
                         }
                         None => self.paste(rest),
                     };
-                    self.overlay.set(if phase == Phase::Done && self.mic_lost { Phase::MicLost } else { phase });
+                    if phase != Phase::Working {
+                        self.overlay.set(if phase == Phase::Done && self.mic_lost { Phase::MicLost } else { phase });
+                    }
                 } else if !out.errors.is_empty() {
                     self.overlay.set(Phase::Failed);
                 } else {
                     eprintln!("no speech in {:.1}s of audio", out.audio_s);
-                    self.overlay.set(if self.mic_lost { Phase::MicLost } else { Phase::NoSpeech });
+                    self.overlay.set(if self.mic_lost {
+                        Phase::MicLost
+                    } else if self.mic_silent {
+                        Phase::MicSilent
+                    } else {
+                        Phase::NoSpeech
+                    });
                 }
                 if self.mic_lost {
-                    self.status_text = "The microphone stopped sending sound: check it, or pick another one in the system settings".into();
+                    self.status_text = "The microphone stopped sending sound: check it, or pick another one in Settings › Microphone".into();
                 }
             }
             UserEvent::UpdateFound(tag) => {
@@ -1023,6 +1059,13 @@ impl App {
                 if generation == self.rec_gen && self.state == State::Recording {
                     self.preview = (part, corrections::finish(&text, &self.corrections, self.cfg.numbers_as_digits), clipped);
                     self.show_heard();
+                }
+            }
+            UserEvent::Delivered(generation, phase) => {
+                // Not over a newer recording's pill (a newer one has another generation; Recent
+                // pasted while recording or transcribing has this one).
+                if generation == self.rec_gen && !matches!(self.state, State::Recording | State::Transcribing) {
+                    self.overlay.set(phase);
                 }
             }
             UserEvent::DecoderInt8(r) => match r {
@@ -1214,6 +1257,10 @@ impl App {
     fn on_hotkey(&mut self, h: HotkeyEvent, at: Instant) {
         match h {
             HotkeyEvent::TalkDown => {
+                // Only soon after: the repeats come as soon as the hook sees the keyboard again;
+                // a press much later is a new one, and may be a tap for hands-free.
+                let after_hidden = self.after_hidden.take().is_some_and(|t| t.elapsed() < AFTER_HIDDEN);
+                self.press_started = false;
                 // Not set up yet: ask for what's missing instead of recording.
                 if !self.busy() {
                     if self.cfg.backend == Backend::Lambda
@@ -1244,12 +1291,14 @@ impl App {
                     // and the key may be let go meanwhile (`check_talk_key`).
                     platform::set_listening(true);
                     self.key_down_seen = platform::talk_key_down() == Some(true);
-                    match self.recorder.start() {
+                    match self.recorder.start(&self.cfg.microphone) {
                         Ok(()) => {
                             // From the key press, not from now: opening the microphone can take
                             // a second or more (Windows, Bluetooth headsets), and timing from here
                             // turned short holds into taps (hands-free mode).
                             self.pressed_at = at;
+                            self.hold_only = after_hidden;
+                            self.press_started = true;
                             eprintln!("microphone started in {} ms", started.elapsed().as_millis());
                             self.state = State::Recording;
                             (self.mic_len, self.mic_seen, self.mic_lost) = (0, Instant::now(), false);
@@ -1267,13 +1316,17 @@ impl App {
                             self.overlay.set(Phase::Failed);
                         }
                     }
+                } else if self.state == State::Transcribing {
+                    // E.g. a server waking up from a cold start: say why nothing happens.
+                    eprintln!("talk key pressed while still transcribing: nothing started");
+                    self.overlay.set(Phase::StillWorking);
                 }
             }
             HotkeyEvent::TalkUp => {
                 if self.state == State::Recording && !self.handsfree {
                     let held = at.saturating_duration_since(self.pressed_at);
                     eprintln!("talk key held {} ms", held.as_millis());
-                    if held < TAP {
+                    if held < TAP && !self.hold_only {
                         self.handsfree = true;
                         if self.cfg.live_typing
                             && let Some(seg) = self.segmenter.as_mut()
@@ -1287,19 +1340,18 @@ impl App {
                     }
                 }
             }
+            HotkeyEvent::TalkAborted => {
+                if self.state == State::Recording && self.press_started {
+                    eprintln!("the talk key was part of a key combination: recording dropped");
+                    self.drop_recording();
+                    self.status_text = self.ready_text();
+                    self.overlay.set(Phase::Hidden);
+                }
+            }
             HotkeyEvent::Escape => {
                 platform::set_listening(false); // (the hook took this Esc: it cancels)
                 if self.state == State::Recording {
-                    self.stop_at = None;
-                    self.recorder.stop_raw();
-                    self.segmenter = None;
-                    if let Some(p) = self.pipeline.take() {
-                        p.cancel();
-                    }
-                    self.rec_gen += 1;
-                    self.end_live(); // what was typed already stays
-                    self.handsfree = false;
-                    self.state = State::Idle;
+                    self.drop_recording();
                     eprintln!("cancelled with Esc");
                     self.status_text = "Cancelled".into();
                     self.overlay.set(Phase::Cancelled);
@@ -1308,12 +1360,37 @@ impl App {
             HotkeyEvent::PermissionMissing => {
                 eprintln!("Cannot watch the keyboard yet: grant Accessibility permission");
                 self.needs_permission = true;
+                // Taken away while dictating: neither the talk key nor Esc could end it now.
+                if self.state == State::Recording {
+                    eprintln!("finishing the recording: it could not be stopped from the keyboard");
+                    self.handsfree = false;
+                    self.finish();
+                }
             }
             HotkeyEvent::Ready => {
                 eprintln!("watching the {TALK_KEY_LABEL} key");
                 self.needs_permission = false;
             }
         }
+    }
+
+    /// Stops the recording and throws it away (Esc, or the talk key was part of a combination).
+    fn drop_recording(&mut self) {
+        platform::set_listening(false);
+        self.stop_at = None;
+        self.recorder.stop_raw();
+        self.segmenter = None;
+        if let Some(p) = self.pipeline.take() {
+            p.cancel();
+        }
+        self.rec_gen += 1;
+        if let Some((typer, _)) = self.typer.take() {
+            typer.cancel(); // what was typed already stays; parts still queued don't
+        }
+        self.end_live();
+        self.handsfree = false;
+        (self.press_started, self.hold_only) = (false, false);
+        self.state = State::Idle;
     }
 
     /// Sets up the segmenter and the background transcription worker for a new recording.
@@ -1380,17 +1457,24 @@ impl App {
         let text = corrections::finish(&text, &self.corrections, self.cfg.numbers_as_digits);
         self.heard.push(text.clone());
         self.show_heard();
-        let live = self.cfg.live_typing && self.handsfree && self.state == State::Recording;
+        let live = self.cfg.live_typing && !self.cfg.copy_only && self.handsfree && self.state == State::Recording;
         if !live || self.typed.len() + 1 != self.heard.len() {
             return; // left for the end, with every part after it (they must stay in order)
         }
         let window = platform::focused_window();
-        if self.typer.as_ref().is_some_and(|(_, w)| *w != window) || platform::foreground_is_elevated() {
+        if self.typer.as_ref().is_some_and(|(_, w)| *w != window) || platform::foreground_is_elevated() || !platform::accessibility_trusted(false) {
             eprintln!("the focused window changed: the rest waits for the end");
             return;
         }
-        let restore = self.cfg.restore_clipboard;
-        let (typer, _) = self.typer.get_or_insert_with(|| (inserter::LiveTyper::start(restore), window));
+        let (restore, p, generation) = (self.cfg.restore_clipboard, self.proxy.clone(), self.rec_gen);
+        let ended = move |e: inserter::Ending| {
+            let phase = match e {
+                inserter::Ending::Copied { elevated } => Phase::Copied { elevated },
+                inserter::Ending::Failed => Phase::Failed,
+            };
+            let _ = p.send_event(UserEvent::Delivered(generation, phase));
+        };
+        let (typer, _) = self.typer.get_or_insert_with(|| (inserter::LiveTyper::start(restore, window, ended), window));
         typer.type_text(continuation(&self.typed, &text));
         self.typed.push(text);
     }
@@ -1427,7 +1511,11 @@ impl App {
         let holding = self.state == State::Recording && !self.handsfree && self.stop_at.is_none();
         let down = if holding { platform::talk_key_down() } else { None };
         self.key_down_seen |= down == Some(true);
-        if down != Some(false) || !self.key_down_seen || self.pressed_at.elapsed() < Duration::from_millis(600) {
+        // macOS: the key itself says it is up. Windows: the hook can't see the keyboard now
+        // (locked screen, UAC prompt, administrator window in front), so its release would be lost.
+        let seen_up = down == Some(false) && self.key_down_seen;
+        let up = seen_up || (holding && platform::release_hidden());
+        if !up || self.pressed_at.elapsed() < Duration::from_millis(600) {
             self.key_up_seen = 0;
             return;
         }
@@ -1437,6 +1525,10 @@ impl App {
         if self.key_up_seen >= 10 {
             eprintln!("the talk key is up but its release was missed: finishing");
             self.key_up_seen = 0;
+            if !seen_up {
+                platform::forget_talk_key();
+                self.after_hidden = Some(Instant::now());
+            }
             self.on_hotkey(HotkeyEvent::TalkUp, Instant::now());
         }
     }
@@ -1584,6 +1676,11 @@ impl App {
         let raw = self.recorder.stop_raw();
         let rate = self.recorder.rate();
         eprintln!("recorded {:.2}s at {rate} Hz", raw.len() as f64 / rate.max(1) as f64);
+        // Real silence still has a little noise; nothing at all means a muted microphone.
+        self.mic_silent = raw.len() > rate as usize / 2 && raw.iter().all(|&v| v == 0.0);
+        if self.mic_silent {
+            eprintln!("the microphone sent only silence (muted?)");
+        }
         let (Some(seg), Some(mut pipe)) = (self.segmenter.take(), self.pipeline.take()) else {
             self.state = State::Idle;
             self.overlay.set(Phase::Hidden);
@@ -1617,20 +1714,31 @@ impl App {
         if text.is_empty() {
             return Phase::Done;
         }
-        if crate::platform::foreground_is_elevated() {
-            eprintln!("focused app runs as administrator: copied instead of pasting");
+        let trusted = platform::accessibility_trusted(false);
+        if self.cfg.copy_only || !trusted || crate::platform::foreground_is_elevated() {
+            if !trusted {
+                eprintln!("no Accessibility permission: copied instead of pasting");
+            } else if !self.cfg.copy_only {
+                eprintln!("focused app runs as administrator: copied instead of pasting");
+            }
             return match inserter::copy_text(&text) {
-                Ok(()) => Phase::Copied,
+                Ok(()) => Phase::Copied { elevated: trusted && !self.cfg.copy_only },
                 Err(e) => {
                     eprintln!("copy error: {e:#}");
                     Phase::Failed
                 }
             };
         }
-        let restore = self.cfg.restore_clipboard;
-        std::thread::spawn(move || {
-            if let Err(e) = inserter::paste_text(&text, restore) {
+        let (restore, p, generation) = (self.cfg.restore_clipboard, self.proxy.clone(), self.rec_gen);
+        let window = platform::focused_window(); // here: on macOS it is current on the main thread
+        std::thread::spawn(move || match inserter::paste_text(&text, restore, window) {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = p.send_event(UserEvent::Delivered(generation, Phase::Copied { elevated: false }));
+            }
+            Err(e) => {
                 eprintln!("paste error: {e:#}");
+                let _ = p.send_event(UserEvent::Delivered(generation, Phase::Failed));
             }
         });
         Phase::Done
@@ -1697,6 +1805,10 @@ impl App {
             "mixed": self.cfg.mixed_english,
             "digits": self.cfg.numbers_as_digits,
             "restore": self.cfg.restore_clipboard,
+            "copyOnly": self.cfg.copy_only,
+            "mics": self.mics,
+            "mic": self.cfg.microphone,
+            "defaultMic": self.default_mic,
             "unload": self.cfg.unload_when_idle,
             "live": self.cfg.live_typing,
             "preview": self.cfg.live_preview,
@@ -1709,6 +1821,11 @@ impl App {
             "updates": update::supported(),
         })
         .to_string()
+    }
+
+    fn refresh_mics(&mut self) {
+        self.mics = crate::audio::microphones();
+        self.default_mic = crate::audio::default_microphone().unwrap_or_default();
     }
 
     fn show_settings_state(&mut self) {
@@ -1732,7 +1849,20 @@ impl App {
         let text = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
         eprintln!("settings: {} {}", v["cmd"].as_str().unwrap_or("?"), v["key"].as_str().unwrap_or(""));
         match v["cmd"].as_str().unwrap_or("") {
+            "mics" => {
+                self.refresh_mics();
+                if let Some(w) = &mut self.settings {
+                    w.forget_state();
+                }
+            }
+            "mic" => {
+                self.cfg.microphone = text("value");
+                self.cfg.save();
+                eprintln!("microphone: {}", if self.cfg.microphone.is_empty() { "the system's" } else { "chosen" });
+                Recorder::warm_up(self.cfg.microphone.clone());
+            }
             "ready" => {
+                self.refresh_mics();
                 self.reload_vocabulary();
                 if let Some(w) = &mut self.settings {
                     w.forget_state();
@@ -1747,6 +1877,7 @@ impl App {
                     "live" => self.cfg.live_typing = on,
                     "preview" => self.cfg.live_preview = on,
                     "restore" => self.cfg.restore_clipboard = on,
+                    "copyOnly" => self.cfg.copy_only = on,
                     "unload" => {
                         self.cfg.unload_when_idle = on;
                         self.last_used = Instant::now();
@@ -1907,8 +2038,12 @@ fn edit_menu() -> Menu {
 /// A message box that doesn't block the event loop.
 /// `next` as typed after the parts already typed: with the space `join_parts` would put there.
 fn continuation(typed: &[String], next: &str) -> String {
-    let after_text = typed.iter().any(|t| !t.is_empty());
-    if after_text && !next.is_empty() && !crate::asr::starts_with_particle(next) { format!(" {next}") } else { next.to_string() }
+    let before = typed.iter().rfind(|t| !t.is_empty());
+    let space = before.is_some_and(|b| !b.ends_with('\n'))
+        && !next.is_empty()
+        && !next.starts_with('\n')
+        && !crate::asr::starts_with_particle(next);
+    if space { format!(" {next}") } else { next.to_string() }
 }
 
 fn show_alert(message: String) {

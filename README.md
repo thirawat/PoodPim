@@ -75,10 +75,17 @@ on Windows also Settings › Apps › PoodPim.
 The menu-bar / tray icon shows the state (mic = ready, red = listening, amber = transcribing).
 If the microphone stops sending sound mid-recording (unplugged, a Bluetooth headset dropping:
 nothing for 2 s, or 5 s from the start), the recording ends, what was heard is typed, and the
-pill says so. If the talk key's release never arrives (macOS Secure Input, e.g. in a password
-field), the app notices the key is up after a second and finishes as if it had been let go.
+pill says so. If the microphone sends nothing but digital silence (muted, or the wrong one
+chosen), the pill says that instead of just "no speech". If the talk key's release never
+arrives (macOS Secure Input, e.g. in a password field), the app notices the key is up after a
+second and finishes as if it had been let go. Pressing the talk key while the last recording
+is still being transcribed (e.g. during a serverless cold start) starts nothing, and the pill
+says to wait.
 Dictating into a password field works, but while macOS Secure Input is on the pill doesn't
 show the words, and the text isn't kept for "Paste last transcript" or Recent.
+On macOS Right ⌥ still reaches the app you're in, so it also types symbols and moves the
+cursor (⌥E for an accent, ⌥← to jump a word). If another key goes down while Right ⌥ is held, within
+0.5 s of pressing it, the recording that press started is dropped instead of turning hands-free.
 Its menu keeps the everyday actions: paste last transcript, **Recent** (the last 10
 transcripts, kept in memory only, each with Paste and "Fix a word…", which opens "Add
 correction…" filled with that transcript), Add correction…, and **Settings…**. "Open
@@ -89,15 +96,17 @@ webview: WKWebView on macOS, WebView2 on Windows, built into Windows 11 and inst
 Edge on Windows 10; without it the app offers Microsoft's download page) with: Local /
 Serverless backend with the server URL and API key, Thai + English vs Thai-only, numbers as
 digits, the vocabulary and corrections files (with their counts and an inline "add
-correction"), restore clipboard, free memory when idle, start at login, updates, the log
-folder, and uninstall. On macOS the app gets a Dock icon and an Edit menu (⌘C / ⌘V in the
+correction"), the microphone, restore clipboard, copy only, free memory when idle, start at
+login, updates, the log folder, and uninstall. On macOS the app gets a Dock icon and an Edit menu (⌘C / ⌘V in the
 fields) only while the window is open.
 
 **Typing while you speak (hands-free):** tap the talk key once and keep talking. Each time
 you pause for about half a second (after at least 3 s of speech) the part you've finished is
 typed straight away, instead of all of it when you tap again. Switch to another window
-meanwhile and typing stops; the rest is put on the clipboard at the end for you to paste. Esc
-stops listening but leaves what was already typed. The clipboard is saved before the first
+meanwhile and typing stops; the rest is put on the clipboard at the end for you to paste, and
+the pill says so once it is there. The same happens if a part can't be pasted (Windows: a
+Shift, Alt or Windows key still held, or an administrator window in front). Esc stops
+listening, leaves what was already typed and drops the parts not typed yet. The clipboard is saved before the first
 part and put back after the last. Hold-to-talk still types everything on release. Off in
 Settings → Typing while you speak.
 
@@ -130,7 +139,19 @@ With "Restore clipboard" on (the default), the transcript is marked so clipboard
 only if nothing else was copied meanwhile. On macOS every type on the clipboard is kept
 (copied files, rich text, HTML), not only plain text and images. On Windows, when the focused
 app runs as administrator (Windows drops PoodPim's Ctrl+V there), the text is put on the
-clipboard for you to paste, and the overlay says so.
+clipboard for you to paste, and the overlay says so. Windows also waits (up to half a second)
+for a Shift, Alt or Windows key you still hold to be let go before sending Ctrl+V, which would
+otherwise become another shortcut; if it stays down, or another window comes to the front
+meanwhile, the text is left on the clipboard instead.
+
+**Microphone:** Settings → Microphone picks the one to record from; by default it follows the
+system's. Choosing the Mac's or laptop's own microphone keeps Bluetooth headphones playing in
+high quality (using their microphone switches them to headset mode). If the chosen one isn't
+plugged in, the system's is used.
+
+**Copy only:** with Settings → Copy only, the transcript is just put on the clipboard and the
+pill says to press ⌘V / Ctrl+V; nothing is pasted for you (Remote Desktop, apps that ignore a
+pasted keystroke). Typing while you speak is off in this mode.
 
 "Free memory when idle" (off by default) frees the local model (~0.75 GB) after 15 minutes
 without dictation. The next press of the talk key records at once and loads the model
@@ -208,7 +229,9 @@ The model hears many English words in Thai speech but spells them by ear ("จ�
   `heard, heard = wanted`; started from [assets/corrections.txt](assets/corrections.txt),
   dev terms such as "เดฟออฟ, depop = DevOps"). Applied in the app, so it works with either
   backend; longest match first; Latin words match whole words only; a Latin replacement
-  next to Thai letters gets a space.
+  next to Thai letters gets a space. `\n` on the right is a new line (`ขึ้นบรรทัดใหม่ = \n`)
+  and nothing on the right deletes the word (`อืม =`); both are in the default file,
+  commented out.
 
 Both files start from the defaults, and a copy of the default is kept beside each
 (`*.txt.orig`): while a file is unedited it follows newer defaults, once edited it is left
@@ -273,6 +296,12 @@ for the server URL / API key with InputBox dialogs. Its log is
 `%LOCALAPPDATA%\poodpim\logs\poodpim.log` (macOS: `~/Library/Logs/PoodPim/poodpim.log`); it
 records timings and errors, not what was said.
 
+Windows can drop a keyboard hook without notice (after sleep, for instance), and then the talk
+key stops working, so PoodPim puts its hook in again after the PC wakes and every 30 minutes
+while idle. The hook can't see keys while the screen is locked, a UAC prompt is up or an
+administrator window is in front; if you are holding the talk key then, the app ends the
+hold after a second instead of waiting for a release it would never see.
+
 ### macOS permissions
 
 Grant to **PoodPim.app** (or to your terminal when running `target/release/poodpim`):
@@ -280,8 +309,11 @@ Grant to **PoodPim.app** (or to your terminal when running `target/release/poodp
 - **Microphone** — asked on first recording.
 - **Accessibility** — System Settings › Privacy & Security › Accessibility. Needed to
   see the talk key in other apps and to send ⌘V. Until it is granted, the menu's top line
-  says so and "Open Accessibility settings…" opens the right page. The app is signed with
-  a fixed local certificate (see `bundle-macos.sh`), so the permission survives rebuilds.
+  says so and "Open Accessibility settings…" opens the right page. If it is taken away
+  while the app runs, the app notices within a second: a recording in progress finishes,
+  text is copied instead of pasted, and the menu shows the same line until it is given back
+  (macOS doesn't ask again by itself). The app is signed with a fixed local certificate (see
+  `bundle-macos.sh`), so the permission survives rebuilds.
 
 ## CLI
 

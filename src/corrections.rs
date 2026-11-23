@@ -56,12 +56,13 @@ pub struct Corrections {
 
 impl Corrections {
     /// Lines `heard = wanted`; several heard forms may be listed, separated by commas.
-    /// Blank lines and lines starting with # are skipped.
+    /// Blank lines and lines starting with # are skipped. `\n` in `wanted` is a new line
+    /// (spoken commands, snippets); an empty `wanted` deletes the word (fillers such as เอ่อ).
     pub fn new(list: &str) -> Self {
         let mut pairs = Vec::new();
         for line in list.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
             let Some((heard, wanted)) = line.split_once('=') else { continue };
-            let wanted = wanted.trim();
+            let wanted = wanted.trim().replace("\\n", "\n");
             for h in heard.split(',').map(str::trim).filter(|h| !h.is_empty()) {
                 pairs.push((h.to_string(), wanted.to_string()));
             }
@@ -147,7 +148,19 @@ pub fn space_thai_latin(text: &str) -> String {
 pub fn finish(text: &str, fixes: &Corrections, digits: bool) -> String {
     let text = fixes.apply(text);
     let text = if digits { crate::numbers::format(&text) } else { text };
-    space_thai_latin(&text)
+    tidy_spaces(&space_thai_latin(&text))
+}
+
+/// After corrections that delete words or put in new lines: no doubled spaces, no space
+/// at the start or end of a line.
+fn tidy_spaces(text: &str) -> String {
+    if !text.contains("  ") && !text.contains('\n') && !text.starts_with(' ') && !text.ends_with(' ') {
+        return text.to_string();
+    }
+    text.split('\n')
+        .map(|line| line.split(' ').filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Appends `heard = wanted` to the user's corrections file (menu → Add correction…).
@@ -166,6 +179,16 @@ pub fn add_to_user_file(heard: &str, wanted: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_lines_and_deleted_words() {
+        let fixes = Corrections::new("ขึ้นบรรทัดใหม่ = \\n\nเอ่อ, อืม =\nลงชื่อ = ขอบคุณครับ\\nสมชาย");
+        let out = |t: &str| finish(t, &fixes, true);
+        assert_eq!(out("สวัสดีครับ ขึ้นบรรทัดใหม่ พรุ่งนี้ประชุม"), "สวัสดีครับ\nพรุ่งนี้ประชุม");
+        assert_eq!(out("เอ่อ ผมว่า อืม ดีครับ"), "ผมว่า ดีครับ");
+        assert_eq!(out("แล้วเจอกัน ลงชื่อ"), "แล้วเจอกัน ขอบคุณครับ\nสมชาย");
+        assert_eq!(out("ปกติ ไม่มีอะไร"), "ปกติ ไม่มีอะไร", "untouched");
+    }
 
     #[test]
     fn spaces_thai_and_latin_apart() {

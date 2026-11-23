@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use crate::features::SAMPLE_RATE;
 
 #[cfg(feature = "desktop")]
-pub use recorder::Recorder;
+pub use recorder::{Recorder, default_microphone, microphones};
 
 #[cfg(feature = "desktop")]
 mod recorder {
@@ -35,9 +35,9 @@ impl Recorder {
         Self { stream: None, buf: Arc::new(Mutex::new(Vec::new())), rate: SAMPLE_RATE, error: Default::default() }
     }
 
-    pub fn start(&mut self) -> Result<()> {
-        let host = cpal::default_host();
-        let device = host.default_input_device().ok_or_else(|| anyhow!("no microphone found"))?;
+    /// `mic`: the id of the microphone to use (`microphones`); empty or gone: the system default.
+    pub fn start(&mut self, mic: &str) -> Result<()> {
+        let device = input_device(mic)?;
         let supported = device.default_input_config().context("microphone config")?;
         let config = supported.config();
         self.rate = config.sample_rate;
@@ -60,11 +60,11 @@ impl Recorder {
     /// Opens the default microphone briefly on a background thread and closes it again. The
     /// first time a process opens it can take seconds (2.7 s measured on a Mac), long enough
     /// to lose the first words or a whole short phrase; afterwards it takes tens of ms.
-    pub fn warm_up() {
-        std::thread::spawn(|| {
+    pub fn warm_up(mic: String) {
+        std::thread::spawn(move || {
             let t0 = std::time::Instant::now();
             let r = (|| -> Result<()> {
-                let device = cpal::default_host().default_input_device().ok_or_else(|| anyhow!("no microphone found"))?;
+                let device = input_device(&mic)?;
                 let supported = device.default_input_config().context("microphone config")?;
                 let stream = match supported.sample_format() {
                     cpal::SampleFormat::F32 => build::<f32>(&device, supported.config(), 1, Arc::new(Mutex::new(Vec::new())), Default::default())?,
@@ -110,6 +110,32 @@ impl Recorder {
         let raw = self.stop_raw();
         resample(&raw, self.rate, SAMPLE_RATE)
     }
+}
+
+/// The microphones there are: (id, name), in the system's order.
+pub fn microphones() -> Vec<(String, String)> {
+    let Ok(devices) = cpal::default_host().input_devices() else { return Vec::new() };
+    // (Not `Device`'s Display: it fails, and to_string() panics, for a device that went away
+    // while listed. Such a one is left out.)
+    devices.filter_map(|d| Some((d.id().ok()?.to_string(), d.description().ok()?.name().to_string()))).collect()
+}
+
+/// The name of the system's default microphone.
+pub fn default_microphone() -> Option<String> {
+    Some(cpal::default_host().default_input_device()?.description().ok()?.name().to_string())
+}
+
+/// The microphone `id` (from `microphones`), or the system default when `id` is empty or that
+/// microphone isn't there now (unplugged headset).
+fn input_device(id: &str) -> Result<cpal::Device> {
+    let host = cpal::default_host();
+    if !id.is_empty() {
+        match id.parse::<cpal::DeviceId>().ok().and_then(|id| host.device_by_id(&id)) {
+            Some(d) => return Ok(d),
+            None => eprintln!("the chosen microphone isn't there: using the system's"),
+        }
+    }
+    host.default_input_device().ok_or_else(|| anyhow!("no microphone found"))
 }
 
 fn build<T>(

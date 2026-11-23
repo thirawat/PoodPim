@@ -6,6 +6,9 @@
 pub enum HotkeyEvent {
     TalkDown,
     TalkUp,
+    /// macOS: another key went down right after the talk key (`TypingGuard`): the user is typing
+    /// a combination such as ⌥E, not dictating. Never sent on Windows.
+    TalkAborted,
     Escape,
     /// The listener could not start (macOS: Accessibility / Input Monitoring not granted). It keeps retrying.
     PermissionMissing,
@@ -56,9 +59,79 @@ fn take_escape() -> bool {
 }
 
 /// Listening or cancelling (macOS: the Esc tap stays on until it is off).
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 fn listening() -> bool {
     LISTEN.load(std::sync::atomic::Ordering::SeqCst) != OFF
+}
+
+/// Another key going down this soon after the talk key means a key combination, not dictation.
+/// Long enough for a quick ⌥E (and longer than TAP, so such a press never turns hands-free),
+/// short enough that a key touched later in a long hold doesn't throw the recording away.
+const TYPING_GUARD: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// macOS: the talk key still reaches the focused app (the tap only listens), so it is also
+/// pressed to type: ⌥E for an accent, ⌥2 for ™, ⌥← to jump a word. Tells such a press apart
+/// from one that starts dictation: another key goes down within TYPING_GUARD of the talk key.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, Default)]
+struct TypingGuard {
+    /// The talk key is down, since then.
+    held: Option<std::time::Instant>,
+    /// TalkAborted was already sent for this press.
+    aborted: bool,
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl TypingGuard {
+    /// The talk key went down or up. (A second "down" means a missed release: a new press.)
+    fn talk_key(&mut self, down: bool, at: std::time::Instant) {
+        self.held = down.then_some(at);
+        self.aborted = false;
+    }
+
+    /// Another key went down (not Esc); `repeat`: the OS repeating a key held from before.
+    /// True once per press, when this key makes the press a key combination.
+    fn other_key(&mut self, repeat: bool, at: std::time::Instant) -> bool {
+        let typing = !repeat
+            && !self.aborted
+            && self.held.is_some_and(|t| at.saturating_duration_since(t) < TYPING_GUARD);
+        self.aborted |= typing;
+        typing
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TypingGuard;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn typing_guard_judges_each_press() {
+        let (mut g, t0) = (TypingGuard::default(), Instant::now());
+        let t = |ms| t0 + Duration::from_millis(ms);
+        // ⌥E typed quickly: one abort per press.
+        g.talk_key(true, t(0));
+        assert!(g.other_key(false, t(120)));
+        assert!(!g.other_key(false, t(140)));
+        g.talk_key(false, t(200));
+        // A key touched later in a long hold is not a combination.
+        g.talk_key(true, t(1000));
+        assert!(!g.other_key(false, t(1600)));
+        g.talk_key(false, t(2000));
+        // Repeats of a key held from before don't count; nor keys while the talk key is up.
+        g.talk_key(true, t(3000));
+        assert!(!g.other_key(true, t(3050)));
+        g.talk_key(false, t(3600));
+        assert!(!g.other_key(false, t(3650)));
+        // Each press is timed from its own start: one right after a long one still counts.
+        g.talk_key(true, t(4000));
+        g.talk_key(false, t(4350));
+        g.talk_key(true, t(4450));
+        assert!(g.other_key(false, t(4500)));
+        // A missed release: the new press is timed from itself, not from the stale one.
+        g.talk_key(true, t(6000));
+        assert!(g.other_key(false, t(6100)));
+    }
 }
 
 #[cfg(target_os = "macos")]
