@@ -10,6 +10,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
 use crate::audio::encode_wav;
+use crate::pipeline::NoAnswer;
 
 #[derive(Clone, Debug)]
 pub struct Server {
@@ -35,6 +36,9 @@ fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .tls_config(TlsConfig::builder().provider(TlsProvider::NativeTls).build())
         .timeout_global(Some(Duration::from_secs(90)))
+        // No network (VPN dropped, captive portal): fail in seconds, not after the 90.
+        .timeout_resolve(Some(Duration::from_secs(10)))
+        .timeout_connect(Some(Duration::from_secs(10)))
         .http_status_as_error(false)
         .build()
         .new_agent()
@@ -77,13 +81,38 @@ impl Server {
             Some(b) => req.header("content-type", "audio/wav").send(&b[..]),
             None => req.send_empty(),
         }
-        .with_context(|| format!("contacting {}", self.url))?;
+        .map_err(|e| {
+            let none = matches!(
+                e,
+                ureq::Error::Timeout(_) | ureq::Error::Io(_) | ureq::Error::HostNotFound | ureq::Error::ConnectionFailed | ureq::Error::BodyStalled
+            );
+            let e = anyhow::Error::new(e).context(format!("contacting {}", self.url));
+            if none { e.context(NoAnswer) } else { e }
+        })?;
         let status = resp.status();
-        let mut text = String::new();
-        resp.into_body().into_reader().read_to_string(&mut text)?;
+        // (A reply cut off or stalled half way is no answer either; one that isn't UTF-8 is a reply.)
+        let mut body = Vec::new();
+        resp.into_body().into_reader().read_to_end(&mut body).map_err(|e| anyhow::Error::new(e).context(NoAnswer))?;
+        // Lossy only for the error message: a transcript with bad bytes is an error, not "�".
+        let shown = || String::from_utf8_lossy(&body).chars().take(200).collect::<String>();
         if !status.is_success() {
-            return Err(anyhow!("server returned {status}: {}", text.chars().take(200).collect::<String>()));
+            return Err(anyhow!("server returned {status}: {}", shown()));
         }
-        serde_json::from_str(&text).with_context(|| format!("unexpected reply: {}", text.chars().take(200).collect::<String>()))
+        serde_json::from_slice(&body).with_context(|| format!("unexpected reply: {}", shown()))
+    }
+}
+
+#[cfg(test)]
+mod no_answer_tests {
+    use super::Server;
+    use crate::pipeline::no_answer;
+
+    #[test]
+    fn a_closed_port_is_no_answer_and_an_unset_key_is_not() {
+        let closed = Server { url: "http://127.0.0.1:9".into(), api_key: "k".into() };
+        let e = closed.warm().unwrap_err();
+        assert!(no_answer(&e), "{e:#}");
+        let unset = Server { url: "http://127.0.0.1:9".into(), api_key: String::new() };
+        assert!(!no_answer(&unset.warm().unwrap_err()));
     }
 }

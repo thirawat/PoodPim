@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use core_foundation::base::TCFType;
 use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::CFDictionary;
-use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes, kCFRunLoopDefaultMode};
+use core_foundation::runloop::{CFRunLoop, CFRunLoopRunResult, kCFRunLoopCommonModes, kCFRunLoopDefaultMode};
 use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
@@ -25,11 +25,31 @@ static ESC_TAP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize:
 
 unsafe extern "C" {
     fn CGEventTapEnable(tap: *const std::ffi::c_void, enable: bool);
+    fn CFMachPortIsValid(port: *const std::ffi::c_void) -> u8;
+}
+
+/// Whether a tap still works (the system invalidates its port when it takes the tap away).
+fn tap_valid(tap: &CGEventTap) -> bool {
+    unsafe { CFMachPortIsValid(tap.mach_port().as_concrete_TypeRef() as *const std::ffi::c_void) != 0 }
 }
 
 /// The Esc press that cancelled dictation is still held: its repeats and release are dropped too.
 static ESC_HELD: AtomicBool = AtomicBool::new(false);
 static ESC_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// The Esc tap was switched off while it should be on, and was put back on less than a second
+/// ago: the hotkey thread's once-a-second check puts it back instead.
+static ESC_RECHECK: AtomicBool = AtomicBool::new(false);
+static ESC_BACK_ON_AT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+/// At most once a second (so an event that answers our own switching can't loop).
+fn esc_back_on_now() -> bool {
+    let mut at = ESC_BACK_ON_AT.lock().unwrap_or_else(|e| e.into_inner());
+    if at.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+        return false;
+    }
+    *at = Some(Instant::now());
+    true
+}
 
 /// Turns the Esc tap on while dictation listens (or its cancelling Esc is held) and off
 /// otherwise. Reads that state under a lock, so that the main thread (`super::set_listening`)
@@ -56,8 +76,16 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
         .name("hotkey".into())
         .spawn(move || {
             let mut warned = false;
+            // Before making the taps again after they went away; doubles while they keep going.
+            let mut remake_pause = Duration::from_secs(1);
+            // Set when the taps went away: waited out at the top of the loop, after the old
+            // taps are dropped (the one that can drop events would hold up every key meanwhile).
+            let mut pause_first: Option<Duration> = None;
             let our_pid = i64::from(std::process::id());
             loop {
+                if let Some(pause) = pause_first.take() {
+                    std::thread::sleep(pause);
+                }
                 // A tap can be created without Accessibility yet receive nothing, so wait for it.
                 if !accessibility_trusted(false) {
                     if !warned {
@@ -143,9 +171,15 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                             // while idle. Only back on if it should be: switching it off again here
                             // sent another one, and so on, keeping this thread busy (about half a
                             // core) whenever dictation wasn't listening (1.0.6, 1.0.7).
+                            // At most once a second from here, in case switching it on gets the
+                            // same answer: the rest waits for the thread's 1 s check.
                             CGEventType::TapDisabledByUserInput => {
                                 if super::listening() || ESC_HELD.load(Ordering::SeqCst) {
-                                    capture_escape();
+                                    if esc_back_on_now() {
+                                        capture_escape();
+                                    } else {
+                                        ESC_RECHECK.store(true, Ordering::SeqCst);
+                                    }
                                 }
                                 CallbackResult::Keep
                             }
@@ -198,10 +232,35 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                     capture_escape();
                 }
                 sink(HotkeyEvent::Ready);
+                warned = false; // a later failure is reported again
+                let made_at = Instant::now();
                 loop {
-                    CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, Duration::from_secs(1), false);
+                    let ran = CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, Duration::from_secs(1), false);
                     if disabled.swap(false, Ordering::SeqCst) {
                         tap.enable();
+                    }
+                    if ESC_RECHECK.swap(false, Ordering::SeqCst) {
+                        capture_escape();
+                    }
+                    // A tap the system took away (its port invalidated): it gets nothing more. With
+                    // none left the run loop would return at once and this loop would spin. Make
+                    // them again after a pause, longer each time if they keep going away.
+                    let gone = matches!(ran, CFRunLoopRunResult::Finished)
+                        || !tap_valid(&tap)
+                        || esc_tap.as_ref().is_some_and(|e| !tap_valid(e));
+                    if gone && accessibility_trusted(false) {
+                        if made_at.elapsed() > Duration::from_secs(60) {
+                            remake_pause = Duration::from_secs(1);
+                        }
+                        eprintln!("a keyboard tap went away: making them again in {} s", remake_pause.as_secs());
+                        {
+                            let _switch = ESC_SWITCH.lock().unwrap_or_else(|e| e.into_inner());
+                            ESC_TAP.store(0, Ordering::SeqCst);
+                        }
+                        ESC_HELD.store(false, Ordering::SeqCst);
+                        pause_first = Some(remake_pause);
+                        remake_pause = (remake_pause * 2).min(Duration::from_secs(30));
+                        break;
                     }
                     // Accessibility taken away while running: the taps get nothing more (and one
                     // that can drop events must not stay in the way of every key, Handy #1281).

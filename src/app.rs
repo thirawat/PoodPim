@@ -1277,6 +1277,17 @@ impl App {
                         self.offer_download();
                         return;
                     }
+                    // The model failed to load (or to download) once: try again, instead of a
+                    // talk key that does nothing until the app is restarted.
+                    if self.cfg.backend == Backend::Local && self.state == State::Error {
+                        if model::is_ready(&model::model_dir()) {
+                            eprintln!("talk key after an error: loading the model again");
+                            self.start_backend();
+                        } else {
+                            self.offer_download();
+                        }
+                        return;
+                    }
                 }
                 if self.state == State::Recording && self.stop_at.is_some() {
                     // Pressed again within TAIL of letting go: carry on with the same recording.
