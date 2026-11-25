@@ -27,6 +27,7 @@ JSON
 rm -rf dist/share "$ZIP"
 APP="$STAGE/PoodPim.app" POODPIM_PRESET="$TMP/preset.json" ./scripts/bundle-macos.sh
 cp scripts/share/install-th.txt "$STAGE/README-TH.txt"
+cp THIRD-PARTY-NOTICES.txt "$STAGE/"
 ditto -c -k --keepParent "$STAGE" "$ZIP"
 rm -rf dist/share
 # install.sh checks the download against this (upload it next to the zip).

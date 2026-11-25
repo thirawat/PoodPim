@@ -45,10 +45,13 @@ impl Segmenter {
         self.start
     }
 
-    /// Looks at `buf[start..]` (the whole recording so far). If a segment is ready, returns
-    /// its `(start, end)` sample range and moves past it.
+    /// Looks at what follows the last cut in `buf` (the recording so far, or a whole file), at
+    /// most MAX_SEG_S of it. If a segment is ready, returns its `(start, end)` sample range and
+    /// moves past it. The limit keeps a pause minutes ahead in a file from making one long
+    /// segment, and the silence level from being taken from the rest of the file.
     pub fn poll(&mut self, buf: &[f32]) -> Option<(usize, usize)> {
-        let pending = buf.get(self.start..)?;
+        let end = buf.len().min(self.start + (MAX_SEG_S * self.rate as f32) as usize);
+        let pending = buf.get(self.start..end)?;
         let cut = find_cut(pending, self.rate, self.min_len)?;
         let range = (self.start, self.start + cut);
         self.start += cut;
@@ -185,6 +188,18 @@ mod tests {
         let mut seg = Segmenter::new(rate as u32);
         seg.set_live();
         assert!(seg.poll(&a).is_some());
+    }
+
+    #[test]
+    fn a_pause_far_ahead_does_not_make_a_long_segment() {
+        // A file: 100 s without a pause, then one. The pause must not be reached in one cut.
+        let rate = 16_000;
+        let mut a = tone(100.0, rate);
+        a.extend(vec![0.0; rate]);
+        a.extend(tone(5.0, rate));
+        let segs = split(&a, rate as u32);
+        let longest = segs.iter().map(|(s, e)| (e - s) as f32 / rate as f32).fold(0.0, f32::max);
+        assert!(longest <= MAX_SEG_S + 0.1, "longest segment {longest} s");
     }
 
     #[test]

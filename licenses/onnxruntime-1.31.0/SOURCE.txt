@@ -1,0 +1,7 @@
+LICENSE and ThirdPartyNotices.txt of ONNX Runtime 1.31.0, the version ort-sys 2.0.0-rc.15
+downloads and links statically into PoodPim (cdn.pyke.io …/ms@1.31.0/…). The prebuilt
+library comes without them, so they are taken from Microsoft's own 1.31.0 package:
+onnxruntime-1.31.0-cp311-cp311-macosx_14_0_arm64.whl on PyPI
+(sha256 cbf1a7f6470ddfe9dbc781966af8ce4a10e1858d75a93f93cc6b9367c9587870),
+files onnxruntime/LICENSE and onnxruntime/ThirdPartyNotices.txt, unchanged.
+Replace them when ort moves to another ONNX Runtime version (scripts/make-notices.sh).

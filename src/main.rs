@@ -18,8 +18,10 @@ const USAGE: &str = "poodpim — Thai push-to-talk dictation
 
 USAGE:
   poodpim                         start the tray / menu-bar app
-  poodpim transcribe <wav>... [--thai-only] [--server] [--live | --live-typing] [--vocabulary FILE | --no-vocabulary]
+  poodpim transcribe <file>... [--thai-only] [--server] [--live | --live-typing] [--vocabulary FILE | --no-vocabulary]
                                [--corrections FILE] [--no-digits]
+                                files: .wav, AAC / ALAC / MP3 audio in .m4a, .mp3, .mp4, .mov, or Opus
+                                          in .webm, .mkv, .opus (a video's first audio track)
                                 --server: send to the configured Lambda instead of the local model
                                 --live:   feed the file in real time like the microphone and report
                                           the wait after release
@@ -200,9 +202,28 @@ fn transcribe(args: &[String]) -> Result<()> {
             Pipeline::start(move |x: &[f32]| a.lock().unwrap().transcribe(x, mixed, &v), None, on_part(tf.clone()))
         })
     };
+    // Files that failed, or were only partly read or transcribed: reported at the end, and the
+    // exit status then says something went wrong, but one bad file doesn't stop the rest.
+    let mut problems: Vec<String> = Vec::new();
+    let n_files = files.len();
     for f in files {
-        let audio = audio::load_wav(&f)?;
+        let t_read = Instant::now();
+        let audio = match audio::load_audio(&f) {
+            Ok(loaded) => {
+                if let Some(why) = loaded.incomplete {
+                    eprintln!("{}: only partly read: {why}", f.display());
+                    problems.push(format!("{}: only partly read: {why}", f.display()));
+                }
+                loaded.audio
+            }
+            Err(e) => {
+                eprintln!("{e:#}");
+                problems.push(format!("{e:#}"));
+                continue;
+            }
+        };
         let secs = audio.len() as f32 / features::SAMPLE_RATE as f32;
+        eprintln!("{}: {:.1} min of audio, read in {:.1}s", f.display(), secs / 60.0, t_read.elapsed().as_secs_f32());
         let mut pipe = make_pipeline();
         let t0 = Instant::now();
         *t_file.lock().unwrap() = t0;
@@ -223,6 +244,7 @@ fn transcribe(args: &[String]) -> Result<()> {
             }
         } else if !args.iter().any(|a| a == "--whole") {
             while let Some((s, e)) = seg.poll(&audio) {
+                pipe.wait_below(4);
                 pipe.push(audio[s..e].to_vec());
             }
         }
@@ -241,8 +263,14 @@ fn transcribe(args: &[String]) -> Result<()> {
         for e in &out.errors {
             eprintln!("segment error: {e}");
         }
+        if !out.errors.is_empty() {
+            problems.push(format!("{}: {} part(s) not transcribed", f.display(), out.errors.len()));
+        }
     }
-    Ok(())
+    if problems.is_empty() {
+        return Ok(());
+    }
+    Err(anyhow!("{} of {n_files} file(s) not fully transcribed:\n  {}", problems.len(), problems.join("\n  ")))
 }
 
 #[cfg(windows)]

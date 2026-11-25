@@ -21,6 +21,8 @@ cp target/release/poodpim "$APP/Contents/MacOS/poodpim"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns" # from assets/logo.svg (scripts/make-icons.sh)
 # The installer and uninstaller, which the app runs to update or remove itself.
 cp install.sh uninstall.sh "$APP/Contents/Resources/"
+# Licences of third-party code built in (libopus, Symphonia): scripts/make-notices.sh.
+cp THIRD-PARTY-NOTICES.txt "$APP/Contents/Resources/"
 if [ -n "${POODPIM_PRESET:-}" ]; then
   cp "$POODPIM_PRESET" "$APP/Contents/Resources/preset.json"
 fi

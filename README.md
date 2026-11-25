@@ -326,6 +326,12 @@ echo "$API_KEY" | poodpim server https://<api-id>.execute-api.ap-southeast-7.ama
 poodpim config                         # show settings (key hidden)
 ```
 
+`transcribe` reads .wav, AAC / ALAC / MP3 in .m4a, .mp3, .mp4 and .mov, and Opus in .webm,
+.mkv and .opus; from a video it takes the first audio track. For a YouTube video, download its
+audio as is (no re-encoding): `yt-dlp -f ba -o "talk.%(ext)s" <url>` gives talk.webm (Opus)
+or talk.m4a (AAC), both readable. An hour of audio takes ~2.5 min on an M3
+and ~1.7 GB of memory.
+
 `POODPIM_TIMING=1` prints mel / encoder / decoder timings.
 
 ## How it works
@@ -353,6 +359,15 @@ Spokenly code or assets are used.
 ## Licences
 
 PoodPim (this code, the logo and the demo): [MIT](LICENSE).
+
+Everything else built into the desktop app is listed with its licence in
+[THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt), which the macOS app
+(`Contents/Resources`) and both download zips include: the native libraries (libopus, ONNX
+Runtime with its own third-party notices, the WebView2 loader on Windows) and every Rust
+crate (by [cargo-about](https://github.com/EmbarkStudios/cargo-about), `about.toml`;
+Symphonia among them, MPL-2.0, unmodified). `scripts/make-notices.sh` writes it: run it again
+and commit the result when `Cargo.lock` changes. `licenses/` keeps the texts cargo-about
+can't find, with where each came from.
 
 The speech model is not part of this repository: the app downloads
 OpenThai2.0-ASR-Streaming from Hugging Face, under its own licence, OpenMDW-1.1 (see
