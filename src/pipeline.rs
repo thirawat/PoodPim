@@ -73,6 +73,8 @@ pub struct Pipeline {
     worker: Option<JoinHandle<Outcome>>,
     cancelled: Arc<AtomicBool>,
     done: Arc<AtomicUsize>,
+    /// Segments that failed (twice) so far.
+    failed: Arc<AtomicUsize>,
     sent: usize,
 }
 
@@ -88,7 +90,8 @@ impl Pipeline {
         let (tx, rx) = channel::<Vec<f32>>();
         let cancelled = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicUsize::new(0));
-        let (c, d) = (cancelled.clone(), done.clone());
+        let failed = Arc::new(AtomicUsize::new(0));
+        let (c, d, f) = (cancelled.clone(), done.clone(), failed.clone());
         let worker = std::thread::spawn(move || {
             if let Some(w) = wait_first {
                 let _ = w.join();
@@ -139,7 +142,10 @@ impl Pipeline {
                                 out.parts.push(t.trim().to_string());
                             }
                         }
-                        Err(e) => out.errors.push(format!("{e:#}")),
+                        Err(e) => {
+                            out.errors.push(format!("{e:#}"));
+                            f.fetch_add(1, Ordering::SeqCst);
+                        }
                     }
                     out.segments += 1;
                     out.audio_s += secs;
@@ -149,7 +155,7 @@ impl Pipeline {
             out.text = join_parts(&out.parts);
             out
         });
-        Self { tx: Some(tx), worker: Some(worker), cancelled, done, sent: 0 }
+        Self { tx: Some(tx), worker: Some(worker), cancelled, done, failed, sent: 0 }
     }
 
     /// Queues a 16 kHz segment.
@@ -166,6 +172,11 @@ impl Pipeline {
         (self.done.load(Ordering::SeqCst), self.sent)
     }
 
+    /// Segments that failed so far (their errors are in the Outcome).
+    pub fn failed(&self) -> usize {
+        self.failed.load(Ordering::SeqCst)
+    }
+
     /// Waits until fewer than `ahead` queued segments are left to do, so a long file isn't
     /// queued (copied) whole. Returns at once if the worker has stopped (crashed, cancelled).
     pub fn wait_below(&self, ahead: usize) {
@@ -175,16 +186,24 @@ impl Pipeline {
         }
     }
 
+    /// Whether the worker is still taking segments (not crashed or cancelled).
+    pub fn is_running(&self) -> bool {
+        self.worker.as_ref().is_some_and(|w| !w.is_finished())
+    }
+
     /// No more segments; returns the worker to join for the result.
     pub fn finish(mut self) -> JoinHandle<Outcome> {
         self.tx = None;
         self.worker.take().expect("worker")
     }
 
-    /// Stops after the segment in progress; the result should be discarded.
-    pub fn cancel(mut self) {
+    /// Stops after the segment in progress. Returns the worker: join it (off the event loop)
+    /// to wait for that segment, which still holds the model until it ends; its Outcome has
+    /// the segments done before.
+    pub fn cancel(mut self) -> JoinHandle<Outcome> {
         self.cancelled.store(true, Ordering::SeqCst);
         self.tx = None;
+        self.worker.take().expect("worker")
     }
 }
 

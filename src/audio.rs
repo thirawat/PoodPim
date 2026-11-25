@@ -309,17 +309,18 @@ pub struct Loaded {
     pub incomplete: Option<String>,
 }
 
-/// Reads an audio or video file as 16 kHz mono f32: WAV, AAC / ALAC / MP3 audio in .m4a,
-/// .mp4, .mov or .mp3, or Opus in .webm, .mkv or .opus (a video's first audio track). Not
-/// ALAC in .mov: symphonia 0.6 finds no audio track in what ffmpeg writes (QuickTime's own
-/// screen recordings are AAC). Not Opus with more than 2 channels.
+/// Reads a whole audio or video file as 16 kHz mono f32 (see `MediaReader`).
 #[cfg(feature = "desktop")]
 pub fn load_audio(path: &Path) -> Result<Loaded> {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-    if ext == "wav" || is_wav(path) {
-        return Ok(Loaded { audio: load_wav(path)?, incomplete: None });
+    let mut reader = MediaReader::open(path)?;
+    let mut audio = Vec::new();
+    if let Some(s) = reader.duration_s() {
+        // Up to 3 h: no doubling as it grows (a wrong length only costs a reallocation).
+        let _ = audio.try_reserve_exact(((s.min(3.0 * 3600.0) + 1.0) * SAMPLE_RATE as f32) as usize);
     }
-    decode_media(path, &ext).with_context(|| format!("reading {}", path.display()))
+    while reader.read(&mut audio)? {}
+    let incomplete = reader.finish()?;
+    Ok(Loaded { audio, incomplete })
 }
 
 /// Whether the file starts like a WAV file (whatever its name).
@@ -331,111 +332,243 @@ fn is_wav(path: &Path) -> bool {
 
 /// The sample rates a file may have: anything else is a damaged header (0 Hz would never
 /// finish resampling).
-#[cfg(feature = "desktop")]
 fn usable_rate(rate: u32) -> Result<u32> {
     if (4_000..=768_000).contains(&rate) { Ok(rate) } else { Err(anyhow::anyhow!("its sample rate ({rate} Hz) can't be right")) }
 }
 
+/// Reads an audio or video file a piece at a time, as 16 kHz mono f32: WAV, AAC / ALAC / MP3
+/// audio in .m4a, .mp4, .mov or .mp3, or Opus in .webm, .mkv or .opus (a video's first audio
+/// track). Not ALAC in .mov: symphonia 0.6 finds no audio track in what ffmpeg writes
+/// (QuickTime's own screen recordings are AAC). Not Opus with more than 2 channels.
+/// A piece at a time, so an hour-long file needn't be held whole (230 MB at 16 kHz).
 #[cfg(feature = "desktop")]
-fn decode_media(path: &Path, ext: &str) -> Result<Loaded> {
-    use anyhow::anyhow;
-    use symphonia::core::errors::Error;
-    use symphonia::core::formats::TrackType;
-    use symphonia::core::formats::probe::Hint;
-    use symphonia::core::io::MediaSourceStream;
+pub struct MediaReader {
+    path: std::path::PathBuf,
+    source: Source,
+    resampler: Option<(u32, Resampler)>,
+    /// 16 kHz samples given out so far.
+    produced: usize,
+    /// How long the file says it is.
+    declared_s: Option<f64>,
+    /// MP3 lengths are often guessed from the first frames: only a large shortfall counts.
+    rough_length: bool,
+    /// Why reading stopped before the end, if it did.
+    stopped: Option<String>,
+    good_packets: usize,
+    bad_packets: usize,
+    done: bool,
+    mono: Vec<f32>,
+}
 
-    let file = std::fs::File::open(path).context("opening it")?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    hint.with_extension(ext);
-    let mut format = symphonia::default::get_probe()
-        .probe(&hint, mss, Default::default(), Default::default())
-        .map_err(|e| anyhow!("not an audio or video file it can read ({e})"))?;
-    const NO_TRACK: &str = "no audio track it can read (AAC, ALAC, MP3 or Opus)";
-    let track = format.default_track(TrackType::Audio).ok_or_else(|| anyhow!(NO_TRACK))?;
-    let track_id = track.id;
-    // How long the file says it is, to tell a file cut off without warning (MP3) from a whole one.
-    let declared_s = match (track.time_base, track.duration) {
-        (Some(tb), Some(d)) => tb.calc_duration(d).map(|t| t.as_secs_f64()),
-        _ => None,
-    };
-    let params = track.codec_params.as_ref().and_then(|p| p.audio()).ok_or_else(|| anyhow!(NO_TRACK))?;
-    let mut codecs = symphonia::core::codecs::registry::CodecRegistry::new();
-    symphonia::default::register_enabled_codecs(&mut codecs);
-    codecs.register_audio_decoder::<symphonia_adapter_libopus::OpusDecoder>();
-    let mut decoder = codecs
-        .make_audio_decoder(params, &Default::default())
-        .map_err(|e| anyhow!("its audio can't be decoded ({e})"))?;
+#[cfg(feature = "desktop")]
+enum Source {
+    Wav { reader: hound::WavReader<std::io::BufReader<std::fs::File>>, channels: usize, float: bool, scale: f32 },
+    Media {
+        format: Box<dyn symphonia::core::formats::FormatReader>,
+        decoder: Box<dyn symphonia::core::codecs::audio::AudioDecoder>,
+        track_id: u32,
+        interleaved: Vec<f32>,
+    },
+}
 
-    let (mut out, mut interleaved, mut mono) = (Vec::new(), Vec::new(), Vec::new());
-    let mut resampler: Option<(u32, Resampler)> = None;
-    let (mut good_packets, mut bad_packets) = (0usize, 0usize);
-    // Why reading stopped before the end, if it did.
-    let mut stopped: Option<String> = None;
-    loop {
-        let packet = match format.next_packet() {
-            Ok(Some(p)) => p,
-            Ok(None) => break,
-            Err(Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                stopped = Some("the file ends part way (cut off?)".into());
-                break;
-            }
-            // E.g. recordings joined one after another in one .opus file.
-            Err(Error::ResetRequired) => {
-                stopped = Some("its audio changes part way (joined recordings?); only the first part was read".into());
-                break;
-            }
-            Err(e) if good_packets > 0 => {
-                stopped = Some(format!("the rest of the file can't be read ({e})"));
-                break;
-            }
-            Err(e) => return Err(anyhow!("{e}")),
+#[cfg(feature = "desktop")]
+impl MediaReader {
+    pub fn open(path: &Path) -> Result<Self> {
+        Self::open_source(path).with_context(|| format!("reading {}", path.display()))
+    }
+
+    fn open_source(path: &Path) -> Result<Self> {
+        use anyhow::anyhow;
+        use symphonia::core::formats::TrackType;
+        use symphonia::core::formats::probe::Hint;
+        use symphonia::core::io::MediaSourceStream;
+
+        let new = |source, resampler, declared_s, rough_length| MediaReader {
+            path: path.to_path_buf(),
+            source,
+            resampler,
+            produced: 0,
+            declared_s,
+            rough_length,
+            stopped: None,
+            good_packets: 0,
+            bad_packets: 0,
+            done: false,
+            mono: Vec::new(),
         };
-        if packet.track_id != track_id {
-            continue;
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        if ext == "wav" || is_wav(path) {
+            let file = std::fs::File::open(path).context("opening it")?;
+            let reader = hound::WavReader::new(std::io::BufReader::new(file)).context("not a WAV file")?;
+            let spec = reader.spec();
+            let rate = usable_rate(spec.sample_rate)?;
+            if spec.channels == 0 || !(1..=32).contains(&spec.bits_per_sample) {
+                return Err(anyhow!("its format can't be right ({} channels, {} bits)", spec.channels, spec.bits_per_sample));
+            }
+            let declared_s = Some(reader.duration() as f64 / rate as f64);
+            let float = spec.sample_format == hound::SampleFormat::Float;
+            let scale = if float { 1.0 } else { (1i64 << (spec.bits_per_sample - 1)) as f32 };
+            let source = Source::Wav { reader, channels: spec.channels as usize, float, scale };
+            return Ok(new(source, Some((rate, Resampler::new(rate, SAMPLE_RATE))), declared_s, false));
         }
-        let buf = match decoder.decode(&packet) {
-            Ok(b) => b,
-            Err(Error::DecodeError(_)) => {
-                bad_packets += 1;
-                continue;
-            }
-            Err(e) => return Err(anyhow!("{e}")),
+        let file = std::fs::File::open(path).context("opening it")?;
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        let mut hint = Hint::new();
+        hint.with_extension(&ext);
+        let format = symphonia::default::get_probe()
+            .probe(&hint, mss, Default::default(), Default::default())
+            .map_err(|e| anyhow!("not an audio or video file it can read ({e})"))?;
+        const NO_TRACK: &str = "no audio track it can read (AAC, ALAC, MP3 or Opus)";
+        let track = format.default_track(TrackType::Audio).ok_or_else(|| anyhow!(NO_TRACK))?;
+        let track_id = track.id;
+        let declared_s = match (track.time_base, track.duration) {
+            (Some(tb), Some(d)) => tb.calc_duration(d).map(|t| t.as_secs_f64()),
+            _ => None,
         };
-        good_packets += 1;
-        let (rate, ch) = (buf.spec().rate(), buf.num_planes().max(1));
-        buf.copy_to_vec_interleaved::<f32>(&mut interleaved);
-        mono.clear();
-        mono.extend(interleaved.chunks(ch).map(|f| f.iter().sum::<f32>() / ch as f32));
-        let (r0, r) = match &mut resampler {
-            Some(r) => r,
-            None => resampler.insert((rate, Resampler::new(usable_rate(rate)?, SAMPLE_RATE))),
-        };
-        if *r0 != rate {
-            return Err(anyhow!("its sample rate changes part way ({r0} → {rate} Hz)"));
+        let params = track.codec_params.as_ref().and_then(|p| p.audio()).ok_or_else(|| anyhow!(NO_TRACK))?;
+        let rough_length = params.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_MP3;
+        let mut codecs = symphonia::core::codecs::registry::CodecRegistry::new();
+        symphonia::default::register_enabled_codecs(&mut codecs);
+        codecs.register_audio_decoder::<symphonia_adapter_libopus::OpusDecoder>();
+        let decoder =
+            codecs.make_audio_decoder(params, &Default::default()).map_err(|e| anyhow!("its audio can't be decoded ({e})"))?;
+        let source = Source::Media { format, decoder, track_id, interleaved: Vec::new() };
+        Ok(new(source, None, declared_s, rough_length))
+    }
+
+    /// How long the file says it is, if it says.
+    pub fn duration_s(&self) -> Option<f32> {
+        self.declared_s.map(|s| s as f32)
+    }
+
+    /// Appends the next piece (a packet, or ~0.1 s of a WAV) to `out`. False at the end.
+    pub fn read(&mut self, out: &mut Vec<f32>) -> Result<bool> {
+        let r = self.read_piece(out);
+        r.with_context(|| format!("reading {}", self.path.display()))
+    }
+
+    fn read_piece(&mut self, out: &mut Vec<f32>) -> Result<bool> {
+        use anyhow::anyhow;
+        use symphonia::core::errors::Error;
+        if self.done {
+            return Ok(false);
         }
-        r.push(&mono, &mut out);
+        let before = out.len();
+        match &mut self.source {
+            Source::Wav { reader, channels, float, scale } => {
+                const FRAMES: usize = 1600;
+                let want = FRAMES * *channels;
+                let mut interleaved = Vec::with_capacity(want);
+                let r: std::result::Result<(), hound::Error> = if *float {
+                    reader.samples::<f32>().take(want).try_for_each(|v| v.map(|v| interleaved.push(v)))
+                } else {
+                    let scale = *scale;
+                    reader.samples::<i32>().take(want).try_for_each(|v| v.map(|v| interleaved.push(v as f32 / scale)))
+                };
+                if let Err(e) = r {
+                    if self.produced == 0 && interleaved.is_empty() {
+                        return Err(anyhow!("{e}"));
+                    }
+                    self.stopped = Some(format!("the rest of the file can't be read ({e})"));
+                    self.done = true;
+                }
+                if interleaved.len() < want {
+                    self.done = true;
+                }
+                self.mono.clear();
+                self.mono.extend(interleaved.chunks(*channels).map(|f| f.iter().sum::<f32>() / *channels as f32));
+                if !self.mono.is_empty() {
+                    self.good_packets += 1;
+                }
+                if let Some((_, r)) = &mut self.resampler {
+                    r.push(&self.mono, out);
+                }
+            }
+            Source::Media { format, decoder, track_id, interleaved } => loop {
+                let packet = match format.next_packet() {
+                    Ok(Some(p)) => p,
+                    Ok(None) => {
+                        self.done = true;
+                        break;
+                    }
+                    Err(Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        self.stopped = Some("the file ends part way (cut off?)".into());
+                        self.done = true;
+                        break;
+                    }
+                    // E.g. recordings joined one after another in one .opus file.
+                    Err(Error::ResetRequired) => {
+                        self.stopped = Some("its audio changes part way (joined recordings?); only the first part was read".into());
+                        self.done = true;
+                        break;
+                    }
+                    Err(e) if self.good_packets > 0 => {
+                        self.stopped = Some(format!("the rest of the file can't be read ({e})"));
+                        self.done = true;
+                        break;
+                    }
+                    Err(e) => return Err(anyhow!("{e}")),
+                };
+                if packet.track_id != *track_id {
+                    continue;
+                }
+                let buf = match decoder.decode(&packet) {
+                    Ok(b) => b,
+                    Err(Error::DecodeError(_)) => {
+                        self.bad_packets += 1;
+                        continue;
+                    }
+                    Err(e) => return Err(anyhow!("{e}")),
+                };
+                self.good_packets += 1;
+                let (rate, ch) = (buf.spec().rate(), buf.num_planes().max(1));
+                buf.copy_to_vec_interleaved::<f32>(interleaved);
+                self.mono.clear();
+                self.mono.extend(interleaved.chunks(ch).map(|f| f.iter().sum::<f32>() / ch as f32));
+                let (r0, r) = match &mut self.resampler {
+                    Some(r) => r,
+                    None => self.resampler.insert((rate, Resampler::new(usable_rate(rate)?, SAMPLE_RATE))),
+                };
+                if *r0 != rate {
+                    return Err(anyhow!("its sample rate changes part way ({r0} → {rate} Hz)"));
+                }
+                r.push(&self.mono, out);
+                break;
+            },
+        }
+        if self.done
+            && let Some((_, r)) = self.resampler.take()
+        {
+            r.finish(out);
+        }
+        self.produced += out.len() - before;
+        Ok(!self.done || out.len() > before)
     }
-    if let Some((_, r)) = resampler {
-        r.finish(&mut out);
+
+    /// After the end: whether the file was read whole (None) or why not; an error if it gave
+    /// no audio at all.
+    pub fn finish(self) -> Result<Option<String>> {
+        use anyhow::anyhow;
+        let MediaReader { path, produced, declared_s, rough_length, mut stopped, good_packets, bad_packets, .. } = self;
+        let read_s = produced as f64 / SAMPLE_RATE as f64;
+        let slack = |d: f64| (d * if rough_length { 0.1 } else { 0.02 }).max(0.25);
+        if let Some(declared) = declared_s.filter(|&d| stopped.is_none() && read_s < d - slack(d)) {
+            stopped = Some(format!("the file ends part way (cut off?): {read_s:.1} of its {declared:.1} s"));
+        }
+        if good_packets == 0 || produced == 0 {
+            let why = match (bad_packets, &stopped) {
+                (0, None) => "its audio track is empty".to_string(),
+                (0, Some(why)) => why.clone(),
+                (n, _) => format!("none of its audio could be decoded ({n} damaged packet(s))"),
+            };
+            return Err(anyhow!("reading {}: {why}", path.display()));
+        }
+        let damaged = (bad_packets > 0).then(|| format!("{bad_packets} damaged packet(s) skipped"));
+        Ok(match (damaged, stopped) {
+            (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+            (a, b) => a.or(b),
+        })
     }
-    let read_s = out.len() as f64 / SAMPLE_RATE as f64;
-    if let Some(declared) = declared_s.filter(|&d| stopped.is_none() && read_s < d - (d * 0.02).max(0.25)) {
-        stopped = Some(format!("the file ends part way (cut off?): {read_s:.1} of its {declared:.1} s"));
-    }
-    if good_packets == 0 {
-        return Err(anyhow!(match (bad_packets, &stopped) {
-            (0, None) => "its audio track is empty".to_string(),
-            (0, Some(why)) => why.clone(),
-            (n, _) => format!("none of its audio could be decoded ({n} damaged packet(s))"),
-        }));
-    }
-    let damaged = (bad_packets > 0).then(|| format!("{bad_packets} damaged packet(s) skipped"));
-    let incomplete = match (damaged, stopped) {
-        (Some(a), Some(b)) => Some(format!("{a}; {b}")),
-        (a, b) => a.or(b),
-    };
-    Ok(Loaded { audio: out, incomplete })
 }
 
 /// Whether any 20 ms frame of `audio` (at `rate`) is louder than -45 dBFS, the level below
@@ -485,6 +618,7 @@ pub fn decode_wav(bytes: &[u8]) -> Result<Vec<f32>> {
 fn read_wav<R: Read + Seek>(reader: R) -> Result<Vec<f32>> {
     let mut r = hound::WavReader::new(reader).context("not a WAV file")?;
     let spec = r.spec();
+    usable_rate(spec.sample_rate)?;
     let ch = spec.channels.max(1) as usize;
     let samples: Vec<f32> = match spec.sample_format {
         hound::SampleFormat::Float => r.samples::<f32>().collect::<Result<_, _>>()?,
@@ -612,6 +746,50 @@ mod tests {
         let secs = loaded.audio.len() as f32 / 16_000.0;
         assert!((0.3..0.9).contains(&secs), "{secs} s");
         assert!(loaded.incomplete.unwrap().contains("ends part way"));
+    }
+
+    /// A WAV file as `hound` writes it.
+    #[cfg(feature = "desktop")]
+    fn wav_bytes(rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {
+        let spec = hound::WavSpec { channels, sample_rate: rate, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = hound::WavWriter::new(&mut buf, spec).unwrap();
+        for &v in samples {
+            w.write_sample(v).unwrap();
+        }
+        w.finalize().unwrap();
+        buf.into_inner()
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn a_wav_with_an_impossible_rate_or_no_samples_is_an_error() {
+        let mut zero_hz = wav_bytes(16_000, 1, &[1000; 16_000]);
+        zero_hz[24..28].copy_from_slice(&0u32.to_le_bytes()); // the header's sample rate
+        for (name, bytes) in [("zero-hz.wav", zero_hz), ("empty.wav", wav_bytes(16_000, 1, &[]))] {
+            let path = temp_file(name, &bytes);
+            let r = super::load_audio(&path);
+            let _ = std::fs::remove_file(&path);
+            assert!(r.is_err(), "{name}: {:?}", r.map(|l| l.audio.len()));
+        }
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn a_stereo_44_khz_wav_is_read_as_16_khz_mono() {
+        // 2 s of 440 Hz in both channels.
+        let frames: Vec<i16> = (0..88_200).flat_map(|i| {
+            let v = (8000.0 * (i as f32 * 440.0 * std::f32::consts::TAU / 44_100.0).sin()) as i16;
+            [v, v]
+        }).collect();
+        let path = temp_file("stereo.wav", &wav_bytes(44_100, 2, &frames));
+        let loaded = super::load_audio(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(loaded.incomplete.is_none());
+        assert!((31_990..=32_010).contains(&loaded.audio.len()), "{}", loaded.audio.len());
+        let mid = &loaded.audio[8_000..24_000];
+        let rising = mid.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
+        assert!((435..=445).contains(&rising), "{rising}");
     }
 
     #[cfg(feature = "desktop")]

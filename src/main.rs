@@ -208,11 +208,13 @@ fn transcribe(args: &[String]) -> Result<()> {
     let n_files = files.len();
     for f in files {
         let t_read = Instant::now();
+        // What went wrong with this file, if anything (one line per file at the end).
+        let mut why: Vec<String> = Vec::new();
         let audio = match audio::load_audio(&f) {
             Ok(loaded) => {
-                if let Some(why) = loaded.incomplete {
-                    eprintln!("{}: only partly read: {why}", f.display());
-                    problems.push(format!("{}: only partly read: {why}", f.display()));
+                if let Some(w) = loaded.incomplete {
+                    eprintln!("{}: only partly read: {w}", f.display());
+                    why.push(format!("only partly read: {w}"));
                 }
                 loaded.audio
             }
@@ -264,7 +266,10 @@ fn transcribe(args: &[String]) -> Result<()> {
             eprintln!("segment error: {e}");
         }
         if !out.errors.is_empty() {
-            problems.push(format!("{}: {} part(s) not transcribed", f.display(), out.errors.len()));
+            why.push(format!("{} part(s) not transcribed", out.errors.len()));
+        }
+        if !why.is_empty() {
+            problems.push(format!("{}: {}", f.display(), why.join("; ")));
         }
     }
     if problems.is_empty() {

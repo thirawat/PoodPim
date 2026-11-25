@@ -499,6 +499,20 @@ pub fn confirm(message: &str, ok: &str, cancel: &str) -> bool {
     out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == ok
 }
 
+/// Asks for a file to open (any kind: what can't be read is reported when reading it).
+/// None if cancelled.
+pub fn choose_file(prompt: &str) -> Option<std::path::PathBuf> {
+    let out = std::process::Command::new("osascript")
+        .args(["-e", "on run argv", "-e", "activate", "-e", "return POSIX path of (choose file with prompt (item 1 of argv))", "-e", "end run", prompt])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None; // cancelled
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string();
+    (!path.is_empty()).then(|| path.into())
+}
+
 /// A one-line text prompt. None if cancelled or left empty.
 pub fn ask_text(message: &str, default: &str) -> Option<String> {
     let t = osascript_prompt(message, default, false)?.trim().to_string();

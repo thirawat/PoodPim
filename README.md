@@ -88,8 +88,17 @@ cursor (⌥E for an accent, ⌥← to jump a word). If another key goes down whi
 0.5 s of pressing it, the recording that press started is dropped instead of turning hands-free.
 Its menu keeps the everyday actions: paste last transcript, **Recent** (the last 10
 transcripts, kept in memory only, each with Paste and "Fix a word…", which opens "Add
-correction…" filled with that transcript), Add correction…, and **Settings…**. "Open
-Accessibility settings…" and "Download model" appear only while needed.
+correction…" filled with that transcript), Add correction…, **Transcribe a file…**, and
+**Settings…**. "Open Accessibility settings…" and "Download model" appear only while needed.
+
+**Transcribe a file…** picks an audio or video file (the formats `poodpim transcribe` reads,
+see [CLI](#cli)) and writes its text to `<name>.txt` next to it (`<name> (2).txt` if taken;
+Downloads if that folder can't be written), one line per part as each part is done
+([src/filejob.rs](src/filejob.rs)). Progress shows in the menu's top line, and the item turns
+into Cancel (the text so far stays). Meanwhile the talk key starts nothing (the pill says
+why). It always uses the model on this computer, taking it one part at a time: with the
+Serverless backend that model must be downloaded, and is loaded for the job and freed after
+it. When done, a dialog offers to open the text.
 
 **Settings…** opens a window ([assets/settings.html](assets/settings.html) in the system
 webview: WKWebView on macOS, WebView2 on Windows, built into Windows 11 and installed with
