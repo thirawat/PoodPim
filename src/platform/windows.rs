@@ -412,7 +412,8 @@ pub fn choose_file(prompt: &str) -> Option<std::path::PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
     use windows::Win32::UI::Controls::Dialogs::{
-        GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+        GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST,
+        OPENFILENAMEW,
     };
     use windows::core::PCWSTR;
 
@@ -428,7 +429,9 @@ pub fn choose_file(prompt: &str) -> Option<std::path::PathBuf> {
         lpstrFile: windows::core::PWSTR(buf.as_mut_ptr()),
         nMaxFile: buf.len() as u32,
         lpstrTitle: PCWSTR(title.as_ptr()),
-        Flags: OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY,
+        // NOCHANGEDIR: else the app's working folder becomes the one picked, and a USB drive
+        // it is on can't be ejected while the app runs.
+        Flags: OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR,
         ..Default::default()
     };
     // The Explorer-style dialog runs COM on this (dialog-only) thread.

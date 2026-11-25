@@ -61,10 +61,10 @@ pub fn ensure_dir(dir: &Path) -> Result<Option<PathBuf>, String> {
         let why = made.err().map_or_else(|| "it isn't a folder".to_string(), |e| e.to_string());
         return Err(format!("PoodPim ใช้โฟลเดอร์เก็บข้อมูล {} ไม่ได้ ({why})", dir.display()));
     };
-    // The nearest folder on the way that is there: a drive's top folder (or /Volumes) means
-    // the drive itself is missing.
+    // The nearest folder on the way that is there. None (Windows: no D:\ at all) or /Volumes
+    // (macOS: no /Volumes/<drive>) means the drive itself is missing.
     let present = target.ancestors().skip(1).find(|a| a.is_dir());
-    let drive_missing = present.is_none_or(|a| a.parent().is_none() || a == Path::new("/Volumes"));
+    let drive_missing = present.is_none_or(|a| a == Path::new("/Volumes"));
     if drive_missing {
         return Err(format!(
             "โฟลเดอร์เก็บข้อมูลของ PoodPim ({}) เป็นทางลัดไปที่\n{}\nซึ่งตอนนี้ไม่มีอยู่ (ไดรฟ์ไม่ได้เสียบอยู่?)\n\n\
@@ -335,6 +335,18 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
         assert_eq!(ensure_dir(&link).unwrap(), Some(target.clone()));
         assert!(target.is_dir() && link.is_dir());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_deleted_folder_at_the_top_of_a_drive_gets_it_back() {
+        // Like D:\PoodPim on Windows: the folder above the target is the drive's top.
+        let d = temp("top");
+        let link = d.join("poodpim");
+        let target = d.join("PoodPim data");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(ensure_dir(&link).unwrap(), Some(target.clone()));
         let _ = std::fs::remove_dir_all(&d);
     }
 

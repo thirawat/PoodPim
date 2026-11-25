@@ -45,6 +45,11 @@ impl Segmenter {
         self.start
     }
 
+    /// The first `n` samples were dropped from the buffer given to `poll` (n ≤ `start`).
+    pub fn rebase(&mut self, n: usize) {
+        self.start -= n;
+    }
+
     /// Looks at what follows the last cut in `buf` (the recording so far, or a whole file), at
     /// most MAX_SEG_S of it. If a segment is ready, returns its `(start, end)` sample range and
     /// moves past it. The limit keeps a pause minutes ahead in a file from making one long

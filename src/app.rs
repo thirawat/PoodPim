@@ -1166,8 +1166,11 @@ impl App {
                     self.status_text = match progress {
                         _ if cancelling => format!("Cancelling {}…", self.file_name),
                         Progress::Reading => format!("Reading {}…", self.file_name),
-                        Progress::Transcribing { done_s, total_s } => {
+                        Progress::Transcribing { done_s, total_s: Some(total_s) } => {
                             format!("Transcribing {} · {} / {}", self.file_name, clock(done_s), clock(total_s))
+                        }
+                        Progress::Transcribing { done_s, total_s: None } => {
+                            format!("Transcribing {} · {}", self.file_name, clock(done_s))
                         }
                     };
                 }
@@ -1508,7 +1511,9 @@ impl App {
         self.recorder.stop_raw();
         self.segmenter = None;
         if let Some(p) = self.pipeline.take() {
-            p.cancel();
+            // Not joined: on the event loop that would wait for the segment in progress. Its
+            // result is ignored (rec_gen), and the next recording's segments queue behind it.
+            drop(p.cancel());
         }
         self.rec_gen += 1;
         if let Some((typer, _)) = self.typer.take() {
@@ -1552,8 +1557,16 @@ impl App {
         }
         self.dialog_open = true;
         let p = self.proxy.clone();
+        let own_model = self.cfg.backend == Backend::Lambda;
         std::thread::spawn(move || {
-            let path = platform::choose_file("เลือกไฟล์เสียงหรือวิดีโอที่จะถอดเสียง");
+            let go = !own_model
+                || platform::confirm(
+                    "การถอดเสียงจากไฟล์ทำในเครื่องนี้ (ไฟล์ยาวส่งไปเซิร์ฟเวอร์ไม่ได้) PoodPim จะโหลดโมเดลถอดเสียงในเครื่อง \
+                     ซึ่งใช้หน่วยความจำเพิ่มราว 1 GB ระหว่างถอด แล้วคืนเมื่อเสร็จ\n\nเลือกไฟล์เลยไหม?",
+                    "เลือกไฟล์",
+                    "ยกเลิก",
+                );
+            let path = if go { platform::choose_file("เลือกไฟล์เสียงหรือวิดีโอที่จะถอดเสียง") } else { None };
             let _ = p.send_event(UserEvent::FileChosen(path));
         });
     }
@@ -1578,23 +1591,26 @@ impl App {
         Ok(match (&self.cfg.backend, &self.asr) {
             (Backend::Local, Some(asr)) => {
                 let asr = asr.clone();
-                Box::new(move |a: &[f32]| asr.lock().unwrap().transcribe(a, mixed, &vocabulary))
+                Box::new(move |a: &[f32]| asr.lock().unwrap_or_else(|e| e.into_inner()).transcribe(a, mixed, &vocabulary))
             }
             (Backend::Local, None) => {
                 let waking = self.wake_model();
                 Box::new(move |a: &[f32]| match waking.wait() {
-                    Ok(asr) => asr.lock().unwrap().transcribe(a, mixed, &vocabulary),
+                    Ok(asr) => asr.lock().unwrap_or_else(|e| e.into_inner()).transcribe(a, mixed, &vocabulary),
                     Err(e) => Err(anyhow::anyhow!("loading the model: {e}")),
                 })
             }
             (Backend::Lambda, _) => {
-                let mut own: Option<OpenThaiAsr> = None;
+                // Loaded on the first part; a failed load is not tried again for every part.
+                let mut own: Option<Result<OpenThaiAsr, String>> = None;
                 Box::new(move |a: &[f32]| {
-                    let asr = match &mut own {
-                        Some(asr) => asr,
-                        None => own.insert(OpenThaiAsr::load_with(&model::model_dir(), false)?),
-                    };
-                    asr.transcribe(a, mixed, &vocabulary)
+                    let loaded = own.get_or_insert_with(|| {
+                        OpenThaiAsr::load_with(&model::model_dir(), false).map_err(|e| format!("loading the model: {e:#}"))
+                    });
+                    match loaded {
+                        Ok(asr) => asr.transcribe(a, mixed, &vocabulary),
+                        Err(e) => Err(anyhow::anyhow!("{e}")),
+                    }
                 })
             }
         })
@@ -1611,10 +1627,6 @@ impl App {
             Ok(t) => t,
             Err(why) => return show_alert(why),
         };
-        let (out, file) = match filejob::create_output(&src) {
-            Ok(r) => r,
-            Err(e) => return show_alert(format!("สร้างไฟล์ข้อความสำหรับ {name} ไม่ได้\n\n{e:#}")),
-        };
         let fixes = Corrections::new(&corrections::read_user_list().0);
         let digits = self.cfg.numbers_as_digits;
         let finish = move |t: &str| corrections::finish(t, &fixes, digits);
@@ -1625,24 +1637,20 @@ impl App {
         self.state = State::TranscribingFile;
         self.status_text = format!("Reading {name}…");
         self.overlay.set(Phase::FileStarted);
-        eprintln!("transcribing a file into {}", out.display());
+        eprintln!("transcribing a file");
         let (p, generation) = (self.proxy.clone(), self.file_gen);
         std::thread::spawn(move || {
             let progress = |pr| {
                 let _ = p.send_event(UserEvent::FileProgress(generation, pr));
             };
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                filejob::run(&src, out.clone(), file, transcribe, finish, &cancel, progress)
+                filejob::run(&src, transcribe, finish, &cancel, progress)
             }));
             let r = match r {
                 Ok(Ok(report)) => Ok(report),
                 Ok(Err(e)) => Err(format!("{e:#}")),
                 Err(_) => Err("the transcription crashed".to_string()),
             };
-            // Nothing written (no speech, a file it can't read, cancelled at once): no empty file.
-            if std::fs::metadata(&out).is_ok_and(|m| m.len() == 0) {
-                let _ = std::fs::remove_file(&out);
-            }
             let _ = p.send_event(UserEvent::FileDone(generation, src, r));
         });
     }
@@ -1656,7 +1664,7 @@ impl App {
                 eprintln!("transcribing a file: {e}");
                 self.overlay.set(Phase::Failed);
                 self.status_text = format!("Couldn't transcribe {name}");
-                let hint = if e.contains("not permitted") || e.contains("denied") {
+                let hint = if cfg!(target_os = "macos") && (e.contains("not permitted") || e.contains("denied")) {
                     "\n\nmacOS อาจยังไม่ให้ PoodPim เปิดไฟล์ในโฟลเดอร์นี้: ดูที่ System Settings › Privacy & Security › Files and Folders"
                 } else {
                     ""
@@ -1664,7 +1672,23 @@ impl App {
                 return show_alert(format!("ถอดเสียงจากไฟล์ {name} ไม่ได้\n\n{e}{hint}"));
             }
         };
-        let written = report.out.exists();
+        let Some(out) = report.out.clone() else {
+            if report.cancelled {
+                self.overlay.set(Phase::Cancelled);
+                self.status_text = "Cancelled".into();
+                return;
+            }
+            self.overlay.set(if report.errors.is_empty() { Phase::NoSpeech } else { Phase::Failed });
+            let mut message = if report.errors.is_empty() {
+                format!("ไม่ได้ยินเสียงพูดในไฟล์ {name}")
+            } else {
+                format!("ถอดเสียงจากไฟล์ {name} ไม่สำเร็จ\n\n{}", report.errors[0])
+            };
+            if let Some(why) = &report.incomplete {
+                message += &format!("\n\n⚠ อ่านไฟล์ได้ไม่ครบ: {why}");
+            }
+            return show_alert(message);
+        };
         eprintln!(
             "file: {:.0} s, {} part(s) with text, {} failed{}{}",
             report.total_s,
@@ -1675,22 +1699,10 @@ impl App {
         );
         if report.cancelled {
             self.overlay.set(Phase::Cancelled);
-            self.status_text = if written {
-                format!("Cancelled: the text so far is in {}", report.out.file_name().unwrap_or_default().to_string_lossy())
-            } else {
-                "Cancelled".into()
-            };
+            self.status_text = format!("Cancelled: the text so far is in {}", out.display());
             return;
         }
-        if !written {
-            self.overlay.set(if report.errors.is_empty() { Phase::NoSpeech } else { Phase::Failed });
-            return show_alert(if report.errors.is_empty() {
-                format!("ไม่ได้ยินเสียงพูดในไฟล์ {name}")
-            } else {
-                format!("ถอดเสียงจากไฟล์ {name} ไม่สำเร็จ\n\n{}", report.errors[0])
-            });
-        }
-        let mut message = format!("ถอดเสียงจาก {name} ({}) เสร็จแล้ว\n\nข้อความอยู่ที่\n{}", clock(report.total_s), report.out.display());
+        let mut message = format!("ถอดเสียงจาก {name} ({}) เสร็จแล้ว\n\nข้อความอยู่ที่\n{}", clock(report.total_s), out.display());
         if let Some(why) = &report.incomplete {
             message += &format!("\n\n⚠ อ่านไฟล์ได้ไม่ครบ: {why}");
         }
@@ -1702,7 +1714,8 @@ impl App {
             return show_alert(message);
         }
         self.dialog_open = true;
-        let (p, out) = (self.proxy.clone(), report.out);
+        message += "\n\nเปิดไฟล์ข้อความเลยไหม?";
+        let p = self.proxy.clone();
         std::thread::spawn(move || {
             let open = platform::confirm(&message, "เปิดไฟล์", "ปิด");
             let _ = p.send_event(UserEvent::FileOpenAnswer(open.then_some(out)));
@@ -1729,7 +1742,7 @@ impl App {
                 let vocabulary = self.vocabulary.clone();
                 Pipeline::start(
                     move |a: &[f32]| match waking.wait() {
-                        Ok(asr) => asr.lock().unwrap().transcribe(a, mixed, &vocabulary),
+                        Ok(asr) => asr.lock().unwrap_or_else(|e| e.into_inner()).transcribe(a, mixed, &vocabulary),
                         Err(e) => Err(anyhow::anyhow!("loading the model: {e}")),
                     },
                     None,
@@ -1739,7 +1752,7 @@ impl App {
             Backend::Local => {
                 let asr = self.asr.clone().expect("model loaded in Idle state");
                 let vocabulary = self.vocabulary.clone();
-                Pipeline::start(move |a: &[f32]| asr.lock().unwrap().transcribe(a, mixed, &vocabulary), None, on_part)
+                Pipeline::start(move |a: &[f32]| asr.lock().unwrap_or_else(|e| e.into_inner()).transcribe(a, mixed, &vocabulary), None, on_part)
             }
             Backend::Lambda => {
                 let stale = self.last_server_ok.is_none_or(|t| t.elapsed() > ASSUME_WARM);
