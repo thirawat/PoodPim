@@ -360,11 +360,14 @@ Spokenly code or assets are used.
 
 PoodPim (this code, the logo and the demo): [MIT](LICENSE).
 
-The desktop app builds in libopus (BSD-3-Clause, with Opus's royalty-free patent licences)
-and Symphonia (MPL-2.0, unmodified) to read audio and video files. Their licences, and where
-Symphonia's source is, are in [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt), which the
-macOS app (`Contents/Resources`) and both download zips include. `scripts/make-notices.sh`
-writes it from the crates' own licence files; run it again when those crates are updated.
+Everything else built into the desktop app is listed with its licence in
+[THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt), which the macOS app
+(`Contents/Resources`) and both download zips include: the native libraries (libopus, ONNX
+Runtime with its own third-party notices, the WebView2 loader on Windows) and every Rust
+crate (by [cargo-about](https://github.com/EmbarkStudios/cargo-about), `about.toml`;
+Symphonia among them, MPL-2.0, unmodified). `scripts/make-notices.sh` writes it: run it again
+and commit the result when `Cargo.lock` changes. `licenses/` keeps the texts cargo-about
+can't find, with where each came from.
 
 The speech model is not part of this repository: the app downloads
 OpenThai2.0-ASR-Streaming from Hugging Face, under its own licence, OpenMDW-1.1 (see

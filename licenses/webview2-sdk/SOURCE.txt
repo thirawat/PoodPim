@@ -1,0 +1,4 @@
+LICENSE.txt and NOTICE.txt of Microsoft's WebView2 SDK (NuGet Microsoft.Web.WebView2).
+Its WebView2LoaderStatic.lib comes with the webview2-com-sys crate and is linked into
+PoodPim.exe (Windows, MSVC). Taken unchanged from microsoft.web.webview2.1.0.3650.58.nupkg
+on api.nuget.org; the same two files, byte for byte, are in 1.0.4370.26.
