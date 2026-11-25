@@ -13,6 +13,31 @@ use std::time::Instant;
 
 use anyhow::Result;
 
+/// A "no answer" (`NoAnswer`) after this long was a timeout: not tried again at once.
+const SLOW_FAILURE: std::time::Duration = std::time::Duration::from_secs(20);
+/// After a part got no answer, the parts queued in the next this-long are skipped (each would
+/// wait as long, holding the app on "working" for minutes); after it, one try.
+const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+/// Only a part whose "no answer" took this long skips the next ones. A quick one (the network
+/// gone for a moment: host not found at once) costs nothing to try again, so it skips nothing.
+const SLOW_NO_ANSWER: std::time::Duration =
+    if cfg!(test) { std::time::Duration::from_millis(50) } else { std::time::Duration::from_secs(5) };
+
+/// A transcriber's error: the server gave no answer at all (no network, a timeout), as opposed to an error reply.
+#[derive(Debug)]
+pub struct NoAnswer;
+
+impl std::fmt::Display for NoAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("no answer from the server")
+    }
+}
+
+/// Whether `e` is a `NoAnswer`.
+pub fn no_answer(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<NoAnswer>().is_some()
+}
+
 use crate::audio::trim_silence;
 use crate::features::SAMPLE_RATE;
 
@@ -69,6 +94,8 @@ impl Pipeline {
                 let _ = w.join();
             }
             let mut out = Outcome { text: String::new(), parts: Vec::new(), segments: 0, audio_s: 0.0, errors: Vec::new() };
+            // When a part last got no answer from the server (none since).
+            let mut no_answer_at: Option<Instant> = None;
             for seg in rx {
                 if c.load(Ordering::SeqCst) {
                     break;
@@ -77,8 +104,31 @@ impl Pipeline {
                 let secs = audio.len() as f32 / SAMPLE_RATE as f32;
                 if secs >= MIN_SEGMENT_S {
                     let t0 = Instant::now();
-                    // One retry: a transient network error shouldn't lose a sentence.
-                    let r = transcribe(audio).or_else(|_| transcribe(audio));
+                    let mut last_try = t0;
+                    let skip = no_answer_at.is_some_and(|t| t.elapsed() < RETRY_AFTER);
+                    let r = if skip {
+                        Err(anyhow::anyhow!("skipped: the server didn't answer a moment ago"))
+                    } else {
+                        // One retry: a transient error shouldn't lose a sentence. Not for no answer
+                        // after a long wait (a timeout: it would only double it), nor while the
+                        // server has just been unreachable (one try per RETRY_AFTER).
+                        match transcribe(audio) {
+                            Err(e) if no_answer(&e) && (t0.elapsed() >= SLOW_FAILURE || no_answer_at.is_some()) => Err(e),
+                            Err(_) => {
+                                last_try = Instant::now();
+                                transcribe(audio)
+                            }
+                            ok => ok,
+                        }
+                    };
+                    // Anything but no answer (a text, an error reply) means it can be reached again.
+                    // Timed on the try that got no answer, not an error reply before it.
+                    if !skip {
+                        no_answer_at = match &r {
+                            Err(e) if no_answer(e) && last_try.elapsed() >= SLOW_NO_ANSWER => Some(Instant::now()),
+                            _ => None,
+                        };
+                    }
                     match r {
                         Ok(t) => {
                             // The text only on a terminal: the app's log file must not collect dictation.
@@ -131,7 +181,75 @@ impl Pipeline {
 
 #[cfg(test)]
 mod tests {
-    use super::join_parts;
+    use super::{Pipeline, join_parts};
+    use std::sync::{Arc, Mutex};
+
+    fn loud_second() -> Vec<f32> {
+        (0..16_000).map(|i| if i % 2 == 0 { 0.3 } else { -0.3 }).collect()
+    }
+
+    fn no_answer() -> anyhow::Error {
+        anyhow::Error::new(std::io::Error::other("timed out")).context(super::NoAnswer)
+    }
+
+    /// Runs `n` segments through a pipeline whose transcriber answers with `reply(call)`;
+    /// returns how often it was called and the outcome.
+    fn run(n: usize, reply: impl Fn(usize) -> anyhow::Result<String> + Send + 'static) -> (usize, super::Outcome) {
+        let calls = Arc::new(Mutex::new(0));
+        let c = calls.clone();
+        let mut p = Pipeline::start(
+            move |_| {
+                let mut n = c.lock().unwrap();
+                *n += 1;
+                reply(*n)
+            },
+            None,
+            |_| {},
+        );
+        for _ in 0..n {
+            p.push(loud_second());
+        }
+        let out = p.finish().join().unwrap();
+        let n = *calls.lock().unwrap();
+        (n, out)
+    }
+
+    #[test]
+    fn a_slow_no_answer_skips_the_parts_right_after() {
+        // Part 1: tried twice, no answer after a wait; parts 2 and 3 skipped without a call.
+        let (calls, out) = run(3, |_| {
+            std::thread::sleep(super::SLOW_NO_ANSWER);
+            Err(no_answer())
+        });
+        assert_eq!(calls, 2);
+        assert_eq!(out.errors.len(), 3);
+        assert!(out.errors[1].starts_with("skipped"));
+    }
+
+    #[test]
+    fn a_quick_no_answer_skips_nothing() {
+        // The network gone for a moment: every part still gets its two tries.
+        let (calls, out) = run(3, |_| Err(no_answer()));
+        assert_eq!(calls, 6);
+        assert_eq!(out.errors.len(), 3);
+        assert!(!out.errors.iter().any(|e| e.starts_with("skipped")));
+    }
+
+    #[test]
+    fn other_errors_are_retried_for_every_part() {
+        // An error reply (or a local failure) is not "no answer": each part gets its retry.
+        let (calls, out) = run(3, |_| Err(anyhow::anyhow!("server returned 500")));
+        assert_eq!(calls, 6);
+        assert_eq!(out.errors.len(), 3);
+    }
+
+    #[test]
+    fn a_retry_that_works_keeps_the_part() {
+        let (calls, out) = run(2, |n| if n == 1 { Err(no_answer()) } else { Ok("ครับ".into()) });
+        assert_eq!(calls, 3);
+        assert_eq!(out.parts, ["ครับ", "ครับ"]);
+        assert!(out.errors.is_empty());
+    }
 
     #[test]
     fn no_space_next_to_a_new_line() {

@@ -815,7 +815,7 @@ impl App {
                     }
                     Err(e) => {
                         eprintln!("server: {e}");
-                        self.key_rejected = e.contains("401");
+                        self.key_rejected = e.starts_with("server returned 401 ");
                         if !self.busy() {
                             self.status_text = if self.key_rejected {
                                 format!("API key was rejected: press {TALK_KEY_LABEL} to enter it")
@@ -869,7 +869,7 @@ impl App {
                 }
                 if let Some(e) = out.errors.first() {
                     eprintln!("{} of {} segments failed: {e}", out.errors.len(), out.segments);
-                    self.key_rejected = e.contains("401");
+                    self.key_rejected = e.starts_with("server returned 401 ");
                     self.status_text = format!(
                         "{} of {} parts failed: {}",
                         out.errors.len(),
@@ -1275,6 +1275,17 @@ impl App {
                     }
                     if self.cfg.backend == Backend::Local && self.state == State::NeedsModel {
                         self.offer_download();
+                        return;
+                    }
+                    // The model failed to load (or to download) once: try again, instead of a
+                    // talk key that does nothing until the app is restarted.
+                    if self.cfg.backend == Backend::Local && self.state == State::Error {
+                        if model::is_ready(&model::model_dir()) {
+                            eprintln!("talk key after an error: loading the model again");
+                            self.start_backend();
+                        } else {
+                            self.offer_download();
+                        }
                         return;
                     }
                 }

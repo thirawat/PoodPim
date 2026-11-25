@@ -12,6 +12,8 @@ ENV PATH=/root/.cargo/bin:$PATH
 WORKDIR /src
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
+# Patched dependencies ([patch.crates-io] in Cargo.toml): cargo needs them to resolve.
+COPY vendor ./vendor
 # Default word lists the code embeds (include_str!).
 COPY assets/vocabulary.txt assets/corrections.txt ./assets/
 RUN --mount=type=cache,target=/root/.cargo/registry \

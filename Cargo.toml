@@ -1,6 +1,6 @@
 [package]
 name = "poodpim"
-version = "1.0.8"
+version = "1.0.9"
 edition = "2024"
 license = "MIT"
 default-run = "poodpim"
@@ -58,8 +58,13 @@ sha2 = "0.11.0"
 
 [target."cfg(windows)".dependencies]
 sha2 = "0.11.0"
-windows = { version = "0.62.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Console", "Win32_System_Registry", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_System_DataExchange", "Win32_Security", "Win32_System_StationsAndDesktops"] }
+windows = { version = "0.62.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Console", "Win32_System_Registry", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_System_DataExchange", "Win32_Security", "Win32_System_StationsAndDesktops", "Win32_UI_Accessibility", "Win32_System_SystemInformation"] }
 
 [profile.release]
 lto = "thin"
 strip = true
+
+# tray-icon 0.26.1 with one fix on Windows (vendor/tray-icon/src/platform_impl/windows/mod.rs,
+# the leave timer): upstream left a 15 ms timer running after the cursor left the icon.
+[patch.crates-io]
+tray-icon = { path = "vendor/tray-icon" }
