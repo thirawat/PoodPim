@@ -407,6 +407,43 @@ pub fn ask_text(message: &str, default: &str) -> Option<String> {
     input_box(message, default, false)
 }
 
+/// Asks for a file to open with the system's Open dialog. None if cancelled.
+pub fn choose_file(prompt: &str) -> Option<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+    use windows::Win32::UI::Controls::Dialogs::{
+        GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    };
+    use windows::core::PCWSTR;
+
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    // Pairs of (label, patterns), each ending in a NUL, the list in two.
+    let filter: Vec<u16> =
+        "Audio / video\0*.m4a;*.mp3;*.mp4;*.mov;*.wav;*.webm;*.mkv;*.opus\0All files\0*.*\0\0".encode_utf16().collect();
+    let title = wide(prompt);
+    let mut buf = vec![0u16; 32 * 1024];
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrFile: windows::core::PWSTR(buf.as_mut_ptr()),
+        nMaxFile: buf.len() as u32,
+        lpstrTitle: PCWSTR(title.as_ptr()),
+        Flags: OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY,
+        ..Default::default()
+    };
+    // The Explorer-style dialog runs COM on this (dialog-only) thread.
+    let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+    let picked = unsafe { GetOpenFileNameW(&mut ofn) }.as_bool();
+    if com {
+        unsafe { CoUninitialize() };
+    }
+    if !picked {
+        return None;
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(std::ffi::OsString::from_wide(&buf[..len]).into())
+}
+
 pub fn ask_api_key(message: &str) -> Option<String> {
     input_box(message, "", true)
 }

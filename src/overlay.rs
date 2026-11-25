@@ -29,6 +29,12 @@ pub enum Phase {
     MicSilent,
     Cancelled,
     Failed,
+    /// Transcribing a file has started (its progress is in the menu, not the pill).
+    FileStarted,
+    /// The talk key was pressed while a file is being transcribed: nothing started.
+    FileBusy,
+    /// A file has been transcribed (a dialog says where the text is).
+    FileDone,
 }
 
 impl Phase {
@@ -50,6 +56,9 @@ impl Phase {
             Phase::MicSilent => "ไมโครโฟนไม่ส่งเสียงมาเลย ปิดเสียงไมค์อยู่ หรือเลือกไมค์ผิดตัว?".into(),
             Phase::Cancelled => "ยกเลิกแล้ว".into(),
             Phase::Failed => "ถอดเสียงไม่สำเร็จ (ดูในเมนู)".into(),
+            Phase::FileStarted => "เริ่มถอดเสียงจากไฟล์ ดูความคืบหน้าในเมนู 🎙".into(),
+            Phase::FileBusy => "กำลังถอดเสียงจากไฟล์ พูดได้เมื่อเสร็จ หรือกดยกเลิกในเมนู 🎙".into(),
+            Phase::FileDone => "✓ ถอดเสียงจากไฟล์เสร็จแล้ว".into(),
         }
     }
 
@@ -59,7 +68,7 @@ impl Phase {
             Phase::Done => Some(Duration::from_millis(900)),
             Phase::NoSpeech | Phase::Cancelled => Some(Duration::from_millis(1200)),
             Phase::Failed | Phase::Copied { .. } | Phase::MicLost | Phase::MicSilent => Some(Duration::from_millis(3500)),
-            Phase::Ready => Some(Duration::from_millis(3000)),
+            Phase::Ready | Phase::FileStarted | Phase::FileBusy | Phase::FileDone => Some(Duration::from_millis(3000)),
             _ => None,
         }
     }
@@ -67,8 +76,8 @@ impl Phase {
     fn rgb(&self) -> [f64; 3] {
         match self {
             Phase::Listening { .. } => [1.0, 0.27, 0.23],
-            Phase::Working | Phase::StillWorking => [1.0, 0.70, 0.25],
-            Phase::Done | Phase::Ready => [0.20, 0.84, 0.29],
+            Phase::Working | Phase::StillWorking | Phase::FileStarted | Phase::FileBusy => [1.0, 0.70, 0.25],
+            Phase::Done | Phase::Ready | Phase::FileDone => [0.20, 0.84, 0.29],
             Phase::Copied { .. } | Phase::MicLost | Phase::MicSilent => [1.0, 0.70, 0.25],
             Phase::Failed => [1.0, 0.27, 0.23],
             _ => [0.6, 0.6, 0.62],

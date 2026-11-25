@@ -175,6 +175,11 @@ impl Pipeline {
         }
     }
 
+    /// Whether the worker is still taking segments (not crashed or cancelled).
+    pub fn is_running(&self) -> bool {
+        self.worker.as_ref().is_some_and(|w| !w.is_finished())
+    }
+
     /// No more segments; returns the worker to join for the result.
     pub fn finish(mut self) -> JoinHandle<Outcome> {
         self.tx = None;

@@ -18,6 +18,8 @@ pub mod app;
 #[cfg(feature = "desktop")]
 pub mod config;
 #[cfg(feature = "desktop")]
+pub mod filejob;
+#[cfg(feature = "desktop")]
 pub mod inserter;
 #[cfg(feature = "desktop")]
 pub mod overlay;

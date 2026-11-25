@@ -29,6 +29,7 @@ use crate::platform::{self, HotkeyEvent, TALK_KEY_LABEL};
 use crate::segment::Segmenter;
 use crate::corrections::{self, Corrections};
 use crate::hotwords::{self, Hotwords};
+use crate::filejob::{self, Progress};
 use crate::{inserter, model, update};
 
 const TAP: Duration = Duration::from_millis(300);
@@ -110,6 +111,14 @@ enum UserEvent {
     ModelUpgradeAnswer(bool),
     ModelUpgradeProgress(u64, u64),
     ModelUpgradeDone(Result<(), String>),
+    /// From "Transcribe a file…": the file picked, or None if cancelled.
+    FileChosen(Option<std::path::PathBuf>),
+    /// How far file job n is (sent when reading starts and when a part is done).
+    FileProgress(u64, Progress),
+    /// File job n has ended: the file, and the report or why it failed.
+    FileDone(u64, std::path::PathBuf, Result<filejob::Report, String>),
+    /// The "done" dialog was closed: the text file to open, if asked for.
+    FileOpenAnswer(Option<std::path::PathBuf>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -121,6 +130,8 @@ enum State {
     Idle,
     Recording,
     Transcribing,
+    /// Transcribing a file from "Transcribe a file…" (the talk key does nothing meanwhile).
+    TranscribingFile,
     Error,
 }
 
@@ -132,6 +143,8 @@ struct Ui {
     paste_last: MenuItem,
     recent: Submenu,
     add_correction: MenuItem,
+    /// "Transcribe a file…", or Cancel while a file is being transcribed.
+    transcribe_file: MenuItem,
     settings: MenuItem,
     download: MenuItem,
     quit: MenuItem,
@@ -263,6 +276,12 @@ struct App {
     remove_fp32_after_load: bool,
     /// Fetching the int8 decoder was started this session (tried again at the next launch).
     decoder_int8_started: bool,
+    /// Bumped per file job, so the events of an older one are ignored.
+    file_gen: u64,
+    /// The file job's Cancel switch, while one runs.
+    file_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// The name of the file being transcribed (for the menu).
+    file_name: String,
 }
 
 /// Locks a file in the settings folder; None if another copy of the app holds it.
@@ -405,6 +424,9 @@ pub fn run() -> Result<()> {
         model_swap_pending: false,
         remove_fp32_after_load: false,
         decoder_int8_started: false,
+        file_gen: 0,
+        file_cancel: None,
+        file_name: String::new(),
     };
     app.reload_vocabulary();
     let mut ui: Option<Ui> = None;
@@ -487,6 +509,8 @@ pub fn run() -> Result<()> {
                     } else if id == ui.add_correction.id() {
                         let last = app.last_text.clone();
                         app.ask_correction(&last);
+                    } else if id == ui.transcribe_file.id() {
+                        app.transcribe_file_clicked();
                     } else if id == ui.paste_last.id() {
                         if let phase @ Phase::Copied { .. } = app.paste(app.last_text.clone()) {
                             app.overlay.set(phase);
@@ -542,15 +566,29 @@ fn build_ui() -> Ui {
     let paste_last = MenuItem::new("Paste last transcript", false, None);
     let recent = Submenu::new("Recent", false);
     let add_correction = MenuItem::new("Add correction…", true, None);
+    let transcribe_file = MenuItem::new("Transcribe a file…", false, None);
     let settings = MenuItem::new("Settings…", true, None);
     let download = MenuItem::new("Download model (1 GB)", true, None);
     let hint = MenuItem::new(format!("Hold {TALK_KEY_LABEL} to talk · tap = hands-free · Esc = cancel"), false, None);
     let quit = MenuItem::new("Quit PoodPim", true, None);
     let menu = Menu::new();
-    let seps: Vec<PredefinedMenuItem> = (0..3).map(|_| PredefinedMenuItem::separator()).collect();
+    let seps: Vec<PredefinedMenuItem> = (0..4).map(|_| PredefinedMenuItem::separator()).collect();
     // The permission and download items go in only while needed (see refresh).
-    menu.append_items(&[&status, &seps[0], &paste_last, &recent, &add_correction, &seps[1], &settings, &seps[2], &hint, &quit])
-        .expect("menu");
+    menu.append_items(&[
+        &status,
+        &seps[0],
+        &paste_last,
+        &recent,
+        &add_correction,
+        &seps[1],
+        &transcribe_file,
+        &seps[2],
+        &settings,
+        &seps[3],
+        &hint,
+        &quit,
+    ])
+    .expect("menu");
     let (icon, template) = icon_for(State::Loading);
     let builder = TrayIconBuilder::new().with_menu(Box::new(menu.clone())).with_tooltip("PoodPim — Thai dictation");
     #[cfg(target_os = "macos")]
@@ -569,6 +607,7 @@ fn build_ui() -> Ui {
         paste_last,
         recent,
         add_correction,
+        transcribe_file,
         settings,
         download,
         quit,
@@ -585,7 +624,7 @@ impl App {
     }
 
     fn busy(&self) -> bool {
-        matches!(self.state, State::Recording | State::Transcribing | State::Downloading)
+        matches!(self.state, State::Recording | State::Transcribing | State::Downloading | State::TranscribingFile)
     }
 
     fn ready_text(&self) -> String {
@@ -761,6 +800,10 @@ impl App {
                         self.state = State::Idle;
                         self.status_text = self.ready_text();
                         self.announce_ready();
+                        // For testing "Transcribe a file…" without the tray menu.
+                        if let Some(f) = std::env::var_os("POODPIM_TRANSCRIBE_FILE").filter(|_| self.file_gen == 0) {
+                            self.start_file_job(f.into());
+                        }
                         // The int8 model loaded fine: the 2.4 GB full-precision one, left from before
                         // 1.0.2 or from a switch that didn't finish, can go (remove_fp32 only acts
                         // when the int8 model is there).
@@ -1075,6 +1118,40 @@ impl App {
                 }
                 Err(e) => eprintln!("int8 decoder: {e} (keeping the fp32 one)"),
             },
+            UserEvent::FileChosen(path) => {
+                self.dialog_open = false;
+                if let Some(path) = path {
+                    self.start_file_job(path);
+                }
+            }
+            UserEvent::FileProgress(generation, progress) => {
+                if generation == self.file_gen && self.state == State::TranscribingFile {
+                    let cancelling = self.file_cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst));
+                    self.status_text = match progress {
+                        _ if cancelling => format!("Cancelling {}…", self.file_name),
+                        Progress::Reading => format!("Reading {}…", self.file_name),
+                        Progress::Transcribing { done_s, total_s } => {
+                            format!("Transcribing {} · {} / {}", self.file_name, clock(done_s), clock(total_s))
+                        }
+                    };
+                }
+            }
+            UserEvent::FileDone(generation, src, r) => {
+                if generation != self.file_gen {
+                    return;
+                }
+                self.file_cancel = None;
+                self.last_used = Instant::now(); // not freed the moment the job ends
+                self.state = State::Idle;
+                self.status_text = self.ready_text();
+                self.file_done(&src, r);
+            }
+            UserEvent::FileOpenAnswer(path) => {
+                self.dialog_open = false;
+                if let Some(path) = path {
+                    platform::open_in_editor(&path);
+                }
+            }
             UserEvent::Menu(_) => {}
             UserEvent::Settings(msg) => self.settings_message(&msg),
         }
@@ -1331,6 +1408,9 @@ impl App {
                     // E.g. a server waking up from a cold start: say why nothing happens.
                     eprintln!("talk key pressed while still transcribing: nothing started");
                     self.overlay.set(Phase::StillWorking);
+                } else if self.state == State::TranscribingFile {
+                    eprintln!("talk key pressed while transcribing a file: nothing started");
+                    self.overlay.set(Phase::FileBusy);
                 }
             }
             HotkeyEvent::TalkUp => {
@@ -1404,6 +1484,195 @@ impl App {
         self.state = State::Idle;
     }
 
+    /// The model freed when idle, loading again (a load already under way, e.g. for a recording
+    /// cancelled and started again, is shared).
+    fn wake_model(&mut self) -> Arc<Waking> {
+        match &self.waking {
+            Some(w) => w.clone(),
+            None => {
+                let w = Arc::new(Waking::default());
+                self.waking = Some(w.clone());
+                w.start(self.proxy.clone(), self.load_gen);
+                w
+            }
+        }
+    }
+
+    /// Menu › Transcribe a file…: pick a file; while one is being transcribed, Cancel.
+    fn transcribe_file_clicked(&mut self) {
+        if self.state == State::TranscribingFile {
+            if let Some(c) = &self.file_cancel {
+                c.store(true, std::sync::atomic::Ordering::SeqCst);
+                self.status_text = format!("Cancelling {}…", self.file_name);
+            }
+            return;
+        }
+        if self.state != State::Idle || self.dialog_open {
+            return;
+        }
+        if let Err(why) = self.file_model_check() {
+            show_alert(why);
+            return;
+        }
+        self.dialog_open = true;
+        let p = self.proxy.clone();
+        std::thread::spawn(move || {
+            let path = platform::choose_file("เลือกไฟล์เสียงหรือวิดีโอที่จะถอดเสียง");
+            let _ = p.send_event(UserEvent::FileChosen(path));
+        });
+    }
+
+    /// Files are transcribed on this computer (a long file is too much for the server, and
+    /// costs per request): with the serverless backend that needs the model downloaded too.
+    fn file_model_check(&self) -> Result<(), String> {
+        if self.cfg.backend == Backend::Lambda && !model::is_ready(&model::model_dir()) {
+            return Err("การถอดเสียงจากไฟล์ทำในเครื่องนี้เท่านั้น จึงต้องมีโมเดลถอดเสียงในเครื่องก่อน (1 GB)\n\n\
+                        ดาวน์โหลดได้ที่เมนู 🎙 › Settings… › เลือก \"เครื่องนี้\" (เลือกกลับเป็นเซิร์ฟเวอร์ของทีมได้หลังดาวน์โหลดเสร็จ)"
+                .into());
+        }
+        Ok(())
+    }
+
+    /// What a file job transcribes with, one part at a time: the loaded model; the model freed
+    /// when idle, loading again; or with the serverless backend, the model on this computer,
+    /// loaded for this job only and freed after it.
+    fn file_transcriber(&mut self) -> Result<Transcriber, String> {
+        self.file_model_check()?;
+        let (mixed, vocabulary) = (self.cfg.mixed_english, self.vocabulary.clone());
+        Ok(match (&self.cfg.backend, &self.asr) {
+            (Backend::Local, Some(asr)) => {
+                let asr = asr.clone();
+                Box::new(move |a: &[f32]| asr.lock().unwrap().transcribe(a, mixed, &vocabulary))
+            }
+            (Backend::Local, None) => {
+                let waking = self.wake_model();
+                Box::new(move |a: &[f32]| match waking.wait() {
+                    Ok(asr) => asr.lock().unwrap().transcribe(a, mixed, &vocabulary),
+                    Err(e) => Err(anyhow::anyhow!("loading the model: {e}")),
+                })
+            }
+            (Backend::Lambda, _) => {
+                let mut own: Option<OpenThaiAsr> = None;
+                Box::new(move |a: &[f32]| {
+                    let asr = match &mut own {
+                        Some(asr) => asr,
+                        None => own.insert(OpenThaiAsr::load_with(&model::model_dir(), false)?),
+                    };
+                    asr.transcribe(a, mixed, &vocabulary)
+                })
+            }
+        })
+    }
+
+    /// Starts transcribing `src` into a text file next to it, on a thread of its own.
+    fn start_file_job(&mut self, src: std::path::PathBuf) {
+        if self.state != State::Idle {
+            return; // a recording started while the picker was open
+        }
+        let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.reload_vocabulary();
+        let transcribe = match self.file_transcriber() {
+            Ok(t) => t,
+            Err(why) => return show_alert(why),
+        };
+        let (out, file) = match filejob::create_output(&src) {
+            Ok(r) => r,
+            Err(e) => return show_alert(format!("สร้างไฟล์ข้อความสำหรับ {name} ไม่ได้\n\n{e:#}")),
+        };
+        let fixes = Corrections::new(&corrections::read_user_list().0);
+        let digits = self.cfg.numbers_as_digits;
+        let finish = move |t: &str| corrections::finish(t, &fixes, digits);
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.file_gen += 1;
+        self.file_cancel = Some(cancel.clone());
+        self.file_name = name.clone();
+        self.state = State::TranscribingFile;
+        self.status_text = format!("Reading {name}…");
+        self.overlay.set(Phase::FileStarted);
+        eprintln!("transcribing a file into {}", out.display());
+        let (p, generation) = (self.proxy.clone(), self.file_gen);
+        std::thread::spawn(move || {
+            let progress = |pr| {
+                let _ = p.send_event(UserEvent::FileProgress(generation, pr));
+            };
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                filejob::run(&src, out.clone(), file, transcribe, finish, &cancel, progress)
+            }));
+            let r = match r {
+                Ok(Ok(report)) => Ok(report),
+                Ok(Err(e)) => Err(format!("{e:#}")),
+                Err(_) => Err("the transcription crashed".to_string()),
+            };
+            // Nothing written (no speech, a file it can't read, cancelled at once): no empty file.
+            if std::fs::metadata(&out).is_ok_and(|m| m.len() == 0) {
+                let _ = std::fs::remove_file(&out);
+            }
+            let _ = p.send_event(UserEvent::FileDone(generation, src, r));
+        });
+    }
+
+    /// Says how a file job ended; offers to open the text.
+    fn file_done(&mut self, src: &std::path::Path, r: Result<filejob::Report, String>) {
+        let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let report = match r {
+            Ok(report) => report,
+            Err(e) => {
+                eprintln!("transcribing a file: {e}");
+                self.overlay.set(Phase::Failed);
+                self.status_text = format!("Couldn't transcribe {name}");
+                let hint = if e.contains("not permitted") || e.contains("denied") {
+                    "\n\nmacOS อาจยังไม่ให้ PoodPim เปิดไฟล์ในโฟลเดอร์นี้: ดูที่ System Settings › Privacy & Security › Files and Folders"
+                } else {
+                    ""
+                };
+                return show_alert(format!("ถอดเสียงจากไฟล์ {name} ไม่ได้\n\n{e}{hint}"));
+            }
+        };
+        let written = report.out.exists();
+        eprintln!(
+            "file: {:.0} s, {} part(s) with text, {} failed{}{}",
+            report.total_s,
+            report.parts,
+            report.errors.len(),
+            if report.cancelled { ", cancelled" } else { "" },
+            report.incomplete.as_deref().map(|w| format!(", only partly read: {w}")).unwrap_or_default()
+        );
+        if report.cancelled {
+            self.overlay.set(Phase::Cancelled);
+            self.status_text = if written {
+                format!("Cancelled: the text so far is in {}", report.out.file_name().unwrap_or_default().to_string_lossy())
+            } else {
+                "Cancelled".into()
+            };
+            return;
+        }
+        if !written {
+            self.overlay.set(if report.errors.is_empty() { Phase::NoSpeech } else { Phase::Failed });
+            return show_alert(if report.errors.is_empty() {
+                format!("ไม่ได้ยินเสียงพูดในไฟล์ {name}")
+            } else {
+                format!("ถอดเสียงจากไฟล์ {name} ไม่สำเร็จ\n\n{}", report.errors[0])
+            });
+        }
+        let mut message = format!("ถอดเสียงจาก {name} ({}) เสร็จแล้ว\n\nข้อความอยู่ที่\n{}", clock(report.total_s), report.out.display());
+        if let Some(why) = &report.incomplete {
+            message += &format!("\n\n⚠ อ่านไฟล์ได้ไม่ครบ: {why}");
+        }
+        if !report.errors.is_empty() {
+            message += &format!("\n\n⚠ ถอดไม่สำเร็จ {} ช่วง: {}", report.errors.len(), report.errors[0]);
+        }
+        self.overlay.set(Phase::FileDone);
+        if self.dialog_open {
+            return show_alert(message);
+        }
+        self.dialog_open = true;
+        let (p, out) = (self.proxy.clone(), report.out);
+        std::thread::spawn(move || {
+            let open = platform::confirm(&message, "เปิดไฟล์", "ปิด");
+            let _ = p.send_event(UserEvent::FileOpenAnswer(open.then_some(out)));
+        });
+    }
+
     /// Sets up the segmenter and the background transcription worker for a new recording.
     fn start_pipeline(&mut self) {
         self.rec_gen += 1;
@@ -1419,17 +1688,8 @@ impl App {
         self.last_used = Instant::now();
         self.pipeline = Some(match self.cfg.backend {
             Backend::Local if self.asr.is_none() => {
-                // Freed when idle: load it while the user speaks; segments wait for it. A load
-                // already under way (recording cancelled and started again) is shared.
-                let waking = match &self.waking {
-                    Some(w) => w.clone(),
-                    None => {
-                        let w = Arc::new(Waking::default());
-                        self.waking = Some(w.clone());
-                        w.start(self.proxy.clone(), self.load_gen);
-                        w
-                    }
-                };
+                // Freed when idle: load it while the user speaks; segments wait for it.
+                let waking = self.wake_model();
                 let vocabulary = self.vocabulary.clone();
                 Pipeline::start(
                     move |a: &[f32]| match waking.wait() {
@@ -2000,17 +2260,24 @@ impl App {
             && matches!(self.state, State::NeedsModel | State::Error)
             && !model::is_ready(&model::model_dir());
         // Menu: status, [permission], separator, Paste last, Recent, Add correction, separator,
-        // Settings, [download], …
+        // Transcribe a file, separator, Settings, [download], …
         if self.needs_permission != ui.shown_permission.get() {
             ui.shown_permission.set(self.needs_permission);
             let _ = if self.needs_permission { ui.menu.insert(&ui.permission, 1) } else { ui.menu.remove(&ui.permission) };
         }
         if need_download != ui.shown_download.get() {
             ui.shown_download.set(need_download);
-            let at = 7 + usize::from(ui.shown_permission.get());
+            let at = 9 + usize::from(ui.shown_permission.get());
             let _ = if need_download { ui.menu.insert(&ui.download, at) } else { ui.menu.remove(&ui.download) };
         }
         ui.paste_last.set_enabled(!self.last_text.is_empty());
+        if self.state == State::TranscribingFile {
+            ui.transcribe_file.set_text(format!("Cancel transcribing {}", self.file_name.replace('&', "&&")));
+            ui.transcribe_file.set_enabled(self.file_cancel.as_ref().is_some_and(|c| !c.load(std::sync::atomic::Ordering::SeqCst)));
+        } else {
+            ui.transcribe_file.set_text("Transcribe a file…");
+            ui.transcribe_file.set_enabled(self.state == State::Idle && !self.dialog_open);
+        }
         if self.recent_dirty {
             self.recent_dirty = false;
             self.rebuild_recent(&ui.recent);
@@ -2057,6 +2324,15 @@ fn continuation(typed: &[String], next: &str) -> String {
     if space { format!(" {next}") } else { next.to_string() }
 }
 
+/// Turns 16 kHz audio into text (one part of a file).
+type Transcriber = Box<dyn FnMut(&[f32]) -> anyhow::Result<String> + Send>;
+
+/// 75 s → "1:15", an hour and more → "1:02:08".
+fn clock(secs: f32) -> String {
+    let s = secs.max(0.0).round() as u64;
+    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
+}
+
 fn show_alert(message: String) {
     std::thread::spawn(move || platform::alert(&message));
 }
@@ -2099,7 +2375,7 @@ impl Waking {
 fn icon_for(state: State) -> (Icon, bool) {
     let (rgb, alpha, template): ([u8; 3], f32, bool) = match state {
         State::Recording => ([0xE5, 0x39, 0x35], 1.0, false),
-        State::Transcribing => ([0xF5, 0x9E, 0x0B], 1.0, false),
+        State::Transcribing | State::TranscribingFile => ([0xF5, 0x9E, 0x0B], 1.0, false),
         State::Idle => (idle_rgb(), 1.0, true),
         _ => (idle_rgb(), 0.45, true),
     };
