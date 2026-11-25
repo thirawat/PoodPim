@@ -149,7 +149,13 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                     std::thread::sleep(Duration::from_secs(2));
                     continue;
                 };
-                let source = tap.mach_port().create_runloop_source(0).expect("runloop source");
+                // (No source: the port was invalidated right after it was made. Again after a pause.)
+                let Ok(source) = tap.mach_port().create_runloop_source(0) else {
+                    eprintln!("a keyboard tap went away at once: making it again in {} s", remake_pause.as_secs());
+                    pause_first = Some(remake_pause);
+                    remake_pause = (remake_pause * 2).min(Duration::from_secs(30));
+                    continue;
+                };
                 CFRunLoop::get_current().add_source(&source, unsafe { kCFRunLoopCommonModes });
                 tap.enable();
                 let s = sink.clone();
@@ -220,13 +226,21 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                         }
                     },
                 )
-                .inspect_err(|_| eprintln!("no Esc tap: Esc reaches the focused app too"))
-                .ok();
-                if let Some(esc) = &esc_tap {
+                .ok()
+                .and_then(|esc| {
                     // A new tap is on: off until dictation listens, as it stands in every key's way.
                     unsafe { CGEventTapEnable(esc.mach_port().as_concrete_TypeRef() as *const std::ffi::c_void, false) };
-                    let source = esc.mach_port().create_runloop_source(0).expect("runloop source");
+                    let source = esc.mach_port().create_runloop_source(0).ok()?;
+                    Some((esc, source))
+                })
+                .map(|(esc, source)| {
                     CFRunLoop::get_current().add_source(&source, unsafe { kCFRunLoopCommonModes });
+                    esc
+                });
+                if esc_tap.is_none() {
+                    eprintln!("no Esc tap: Esc reaches the focused app too");
+                }
+                if let Some(esc) = &esc_tap {
                     // (The tap and this thread live as long as the app.)
                     ESC_TAP.store(esc.mach_port().as_concrete_TypeRef() as usize, Ordering::SeqCst);
                     capture_escape();

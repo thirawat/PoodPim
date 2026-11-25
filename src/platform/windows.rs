@@ -30,6 +30,10 @@ static TALK_SEEN_AT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32
 /// Another key went down during this press of the talk key: Windows repeats only the last key
 /// pressed, so the talk key's repeats stopped although it may still be held.
 static OTHER_KEY: AtomicBool = AtomicBool::new(false);
+/// The talk key auto-repeated during this press. Some keyboards never repeat it (a VM or a
+/// remote desktop from a Mac, where modifiers don't repeat): without repeats seen, their
+/// stopping says nothing.
+static REPEAT_SEEN: AtomicBool = AtomicBool::new(false);
 
 /// Accessibility FilterKeys can slow key repeat down to seconds, or turn it off.
 fn filter_keys_on() -> bool {
@@ -73,6 +77,8 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
             // Woke up, or a key's release went missing: put in again once the keys are up.
             let mut woke = false;
             let mut missed = false;
+            // The previous tick's time (GetTickCount, like the key events' times; it runs on in sleep).
+            let mut last_tick_ms = windows::Win32::System::SystemInformation::GetTickCount();
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 if msg.message != WM_TIMER {
@@ -84,14 +90,21 @@ pub fn spawn_hotkey_listener(sink: HotkeySink) {
                 // A key really held keeps auto-repeating (at the slowest setting every ~400 ms,
                 // after at most 1 s). Taken as down with no down event for 1.5 s, its release was
                 // missed: let go in sleep, or while the hook was dropped or kept from the keyboard.
-                // While dictation listens, not when its repeats can stop while it is held: another
-                // key pressed meanwhile, or FilterKeys (except across sleep: nothing is held
-                // through it). Not listening, there is nothing to cut short.
+                // While dictation listens, only when this press did repeat and nothing else can
+                // have stopped it while held: another key pressed meanwhile, or FilterKeys. Also
+                // after sleep, for a press from before it (nothing is held through sleep; a press
+                // from after it is judged as above). Not listening, there is nothing to cut short.
                 // (Signed: an event stamped a few ms after the timer counts as recent too.)
                 let quiet = |at: &std::sync::atomic::AtomicU32| (msg.time.wrapping_sub(at.load(Ordering::SeqCst)) as i32) >= 1500;
+                // A press from after the wake was seen more than a tick after the tick before it.
+                let pressed_before_sleep =
+                    (TALK_SEEN_AT.load(Ordering::SeqCst).wrapping_sub(last_tick_ms) as i32) <= (TICK_MS + 2000) as i32;
+                last_tick_ms = msg.time;
                 let talk_stale = TALK_DOWN.load(Ordering::SeqCst)
                     && quiet(&TALK_SEEN_AT)
-                    && (just_woke || !super::listening() || (!OTHER_KEY.load(Ordering::SeqCst) && !filter_keys_on()));
+                    && ((just_woke && pressed_before_sleep)
+                        || !super::listening()
+                        || (REPEAT_SEEN.load(Ordering::SeqCst) && !OTHER_KEY.load(Ordering::SeqCst) && !filter_keys_on()));
                 if talk_stale && TALK_DOWN.swap(false, Ordering::SeqCst) {
                     eprintln!("the talk key's release was missed: taken as let go");
                     sink(HotkeyEvent::TalkUp); // ends the hold (a dictation would record on)
@@ -140,8 +153,11 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                 if is_down {
                     TALK_SEEN_AT.store(kb.time, Ordering::SeqCst);
                 }
-                if is_down && !TALK_DOWN.swap(true, Ordering::SeqCst) {
+                if is_down && TALK_DOWN.swap(true, Ordering::SeqCst) {
+                    REPEAT_SEEN.store(true, Ordering::SeqCst);
+                } else if is_down {
                     OTHER_KEY.store(false, Ordering::SeqCst);
+                    REPEAT_SEEN.store(false, Ordering::SeqCst);
                     sink(HotkeyEvent::TalkDown);
                 } else if is_up && TALK_DOWN.swap(false, Ordering::SeqCst) {
                     sink(HotkeyEvent::TalkUp);

@@ -18,6 +18,10 @@ const SLOW_FAILURE: std::time::Duration = std::time::Duration::from_secs(20);
 /// After a part got no answer, the parts queued in the next this-long are skipped (each would
 /// wait as long, holding the app on "working" for minutes); after it, one try.
 const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+/// Only a part whose "no answer" took this long skips the next ones. A quick one (the network
+/// gone for a moment: host not found at once) costs nothing to try again, so it skips nothing.
+const SLOW_NO_ANSWER: std::time::Duration =
+    if cfg!(test) { std::time::Duration::from_millis(50) } else { std::time::Duration::from_secs(5) };
 
 /// A transcriber's error: the server gave no answer at all (no network, a timeout), as opposed to an error reply.
 #[derive(Debug)]
@@ -100,6 +104,7 @@ impl Pipeline {
                 let secs = audio.len() as f32 / SAMPLE_RATE as f32;
                 if secs >= MIN_SEGMENT_S {
                     let t0 = Instant::now();
+                    let mut last_try = t0;
                     let skip = no_answer_at.is_some_and(|t| t.elapsed() < RETRY_AFTER);
                     let r = if skip {
                         Err(anyhow::anyhow!("skipped: the server didn't answer a moment ago"))
@@ -109,14 +114,18 @@ impl Pipeline {
                         // server has just been unreachable (one try per RETRY_AFTER).
                         match transcribe(audio) {
                             Err(e) if no_answer(&e) && (t0.elapsed() >= SLOW_FAILURE || no_answer_at.is_some()) => Err(e),
-                            Err(_) => transcribe(audio),
+                            Err(_) => {
+                                last_try = Instant::now();
+                                transcribe(audio)
+                            }
                             ok => ok,
                         }
                     };
                     // Anything but no answer (a text, an error reply) means it can be reached again.
+                    // Timed on the try that got no answer, not an error reply before it.
                     if !skip {
                         no_answer_at = match &r {
-                            Err(e) if no_answer(e) => Some(Instant::now()),
+                            Err(e) if no_answer(e) && last_try.elapsed() >= SLOW_NO_ANSWER => Some(Instant::now()),
                             _ => None,
                         };
                     }
@@ -206,12 +215,24 @@ mod tests {
     }
 
     #[test]
-    fn no_answer_skips_the_parts_right_after() {
-        // Part 1: tried twice (quick no answer), parts 2 and 3 skipped without a call.
-        let (calls, out) = run(3, |_| Err(no_answer()));
+    fn a_slow_no_answer_skips_the_parts_right_after() {
+        // Part 1: tried twice, no answer after a wait; parts 2 and 3 skipped without a call.
+        let (calls, out) = run(3, |_| {
+            std::thread::sleep(super::SLOW_NO_ANSWER);
+            Err(no_answer())
+        });
         assert_eq!(calls, 2);
         assert_eq!(out.errors.len(), 3);
         assert!(out.errors[1].starts_with("skipped"));
+    }
+
+    #[test]
+    fn a_quick_no_answer_skips_nothing() {
+        // The network gone for a moment: every part still gets its two tries.
+        let (calls, out) = run(3, |_| Err(no_answer()));
+        assert_eq!(calls, 6);
+        assert_eq!(out.errors.len(), 3);
+        assert!(!out.errors.iter().any(|e| e.starts_with("skipped")));
     }
 
     #[test]

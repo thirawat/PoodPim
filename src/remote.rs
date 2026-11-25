@@ -6,7 +6,7 @@
 use std::io::Read;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use serde::Deserialize;
 
 use crate::audio::encode_wav;
@@ -39,6 +39,9 @@ fn agent() -> ureq::Agent {
         // No network (VPN dropped, captive portal): fail in seconds, not after the 90.
         .timeout_resolve(Some(Duration::from_secs(10)))
         .timeout_connect(Some(Duration::from_secs(10)))
+        // The wait is for the answer's head (the transcription); the body comes right after.
+        // A body stalled after an error status would otherwise hold each try for the 90.
+        .timeout_recv_body(Some(Duration::from_secs(10)))
         .http_status_as_error(false)
         .build()
         .new_agent()
@@ -90,15 +93,20 @@ impl Server {
             if none { e.context(NoAnswer) } else { e }
         })?;
         let status = resp.status();
-        // (A reply cut off or stalled half way is no answer either; one that isn't UTF-8 is a reply.)
         let mut body = Vec::new();
-        resp.into_body().into_reader().read_to_end(&mut body).map_err(|e| anyhow::Error::new(e).context(NoAnswer))?;
-        // Lossy only for the error message: a transcript with bad bytes is an error, not "�".
-        let shown = || String::from_utf8_lossy(&body).chars().take(200).collect::<String>();
+        let read = resp.into_body().into_reader().read_to_end(&mut body);
         if !status.is_success() {
-            return Err(anyhow!("server returned {status}: {}", shown()));
+            // An error reply stays one (a 401 asks for the key) even if its text was cut off.
+            let shown = String::from_utf8_lossy(&body).chars().take(200).collect::<String>();
+            return Err(anyhow!("server returned {status}: {shown}"));
         }
-        serde_json::from_slice(&body).with_context(|| format!("unexpected reply: {}", shown()))
+        // A good reply cut off or stalled half way is no answer.
+        read.map_err(|e| anyhow::Error::new(e).context(NoAnswer))?;
+        // Not shown on failure: it may hold dictated words, and errors go to the log file.
+        // (Bad bytes in it are an error too, not "�".)
+        // serde's own message can quote a value, so only its kind and place.
+        serde_json::from_slice(&body)
+            .map_err(|e| anyhow!("unexpected reply from the server: {:?} error at line {} column {}", e.classify(), e.line(), e.column()))
     }
 }
 

@@ -815,7 +815,7 @@ impl App {
                     }
                     Err(e) => {
                         eprintln!("server: {e}");
-                        self.key_rejected = e.contains("401");
+                        self.key_rejected = e.starts_with("server returned 401 ");
                         if !self.busy() {
                             self.status_text = if self.key_rejected {
                                 format!("API key was rejected: press {TALK_KEY_LABEL} to enter it")
@@ -869,7 +869,7 @@ impl App {
                 }
                 if let Some(e) = out.errors.first() {
                     eprintln!("{} of {} segments failed: {e}", out.errors.len(), out.segments);
-                    self.key_rejected = e.contains("401");
+                    self.key_rejected = e.starts_with("server returned 401 ");
                     self.status_text = format!(
                         "{} of {} parts failed: {}",
                         out.errors.len(),
