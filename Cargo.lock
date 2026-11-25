@@ -2557,7 +2557,7 @@ dependencies = [
 
 [[package]]
 name = "poodpim"
-version = "1.0.9-rc.2"
+version = "1.0.9"
 dependencies = [
  "anyhow",
  "arboard",
