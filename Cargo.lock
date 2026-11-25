@@ -2579,6 +2579,7 @@ version = "1.0.9"
 dependencies = [
  "anyhow",
  "arboard",
+ "block2",
  "core-foundation",
  "core-graphics",
  "cpal",

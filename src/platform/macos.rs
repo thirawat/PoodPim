@@ -499,18 +499,41 @@ pub fn confirm(message: &str, ok: &str, cancel: &str) -> bool {
     out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == ok
 }
 
-/// Asks for a file to open (any kind: what can't be read is reported when reading it).
-/// None if cancelled.
-pub fn choose_file(prompt: &str) -> Option<std::path::PathBuf> {
-    let out = std::process::Command::new("osascript")
-        .args(["-e", "on run argv", "-e", "activate", "-e", "return POSIX path of (choose file with prompt (item 1 of argv))", "-e", "end run", prompt])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None; // cancelled
-    }
-    let path = String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string();
-    (!path.is_empty()).then(|| path.into())
+/// Asks for a file to open (any kind: what can't be read is reported when reading it) with
+/// the system's Open panel, in this process: an osascript dialog takes ~2 s to appear
+/// (`activate`). Call on the main thread (the event loop's); returns at once, and `done`
+/// gets the file, or None if cancelled, on the main thread when the panel closes.
+pub fn choose_file(prompt: &str, done: impl FnOnce(Option<std::path::PathBuf>) + Send + 'static) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSModalResponse, NSModalResponseOK, NSOpenPanel};
+    use objc2_foundation::NSString;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        eprintln!("choose_file: not on the main thread");
+        return done(None);
+    };
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseFiles(true);
+    panel.setCanChooseDirectories(false);
+    panel.setAllowsMultipleSelection(false);
+    panel.setMessage(Some(&NSString::from_str(prompt)));
+    // A menu-bar app isn't frontmost: without this the panel opens behind the window in use.
+    #[allow(deprecated)] // activate() is macOS 14+; the app runs on 13.4
+    NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    // The block is Fn and called once; the panel keeps it (and the block the panel) until then.
+    let done = std::cell::Cell::new(Some(done));
+    let p = panel.clone();
+    let handler = block2::RcBlock::new(move |response: NSModalResponse| {
+        let path = (response == NSModalResponseOK)
+            .then(|| p.URLs().firstObject())
+            .flatten()
+            .and_then(|url| url.path())
+            .map(|path| std::path::PathBuf::from(path.to_string()));
+        if let Some(done) = done.take() {
+            done(path);
+        }
+    });
+    panel.beginWithCompletionHandler(&handler);
 }
 
 /// A one-line text prompt. None if cancelled or left empty.

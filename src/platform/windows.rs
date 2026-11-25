@@ -407,8 +407,14 @@ pub fn ask_text(message: &str, default: &str) -> Option<String> {
     input_box(message, default, false)
 }
 
-/// Asks for a file to open with the system's Open dialog. None if cancelled.
-pub fn choose_file(prompt: &str) -> Option<std::path::PathBuf> {
+/// Asks for a file to open with the system's Open dialog, on a thread of its own; returns at
+/// once, and `done` gets the file, or None if cancelled (as on macOS).
+pub fn choose_file(prompt: &str, done: impl FnOnce(Option<std::path::PathBuf>) + Send + 'static) {
+    let prompt = prompt.to_string();
+    std::thread::spawn(move || done(open_dialog(&prompt)));
+}
+
+fn open_dialog(prompt: &str) -> Option<std::path::PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
     use windows::Win32::UI::Controls::Dialogs::{

@@ -111,6 +111,8 @@ enum UserEvent {
     ModelUpgradeAnswer(bool),
     ModelUpgradeProgress(u64, u64),
     ModelUpgradeDone(Result<(), String>),
+    /// The Serverless-backend notice before "Transcribe a file…" was answered: true = go on.
+    FileGoAhead(bool),
     /// From "Transcribe a file…": the file picked, or None if cancelled.
     FileChosen(Option<std::path::PathBuf>),
     /// How far file job n is (sent when reading starts and when a part is done).
@@ -1154,6 +1156,13 @@ impl App {
                 }
                 Err(e) => eprintln!("int8 decoder: {e} (keeping the fp32 one)"),
             },
+            UserEvent::FileGoAhead(go) => {
+                if go {
+                    self.open_file_picker(); // dialog_open stays set until FileChosen
+                } else {
+                    self.dialog_open = false;
+                }
+            }
             UserEvent::FileChosen(path) => {
                 self.dialog_open = false;
                 if let Some(path) = path {
@@ -1556,17 +1565,26 @@ impl App {
             return;
         }
         self.dialog_open = true;
+        if self.cfg.backend != Backend::Lambda {
+            return self.open_file_picker();
+        }
         let p = self.proxy.clone();
-        let own_model = self.cfg.backend == Backend::Lambda;
         std::thread::spawn(move || {
-            let go = !own_model
-                || platform::confirm(
-                    "การถอดเสียงจากไฟล์ทำในเครื่องนี้ (ไฟล์ยาวส่งไปเซิร์ฟเวอร์ไม่ได้) PoodPim จะโหลดโมเดลถอดเสียงในเครื่อง \
-                     ซึ่งใช้หน่วยความจำเพิ่มราว 1 GB ระหว่างถอด แล้วคืนเมื่อเสร็จ\n\nเลือกไฟล์เลยไหม?",
-                    "เลือกไฟล์",
-                    "ยกเลิก",
-                );
-            let path = if go { platform::choose_file("เลือกไฟล์เสียงหรือวิดีโอที่จะถอดเสียง") } else { None };
+            let go = platform::confirm(
+                "การถอดเสียงจากไฟล์ทำในเครื่องนี้ (ไฟล์ยาวส่งไปเซิร์ฟเวอร์ไม่ได้) PoodPim จะโหลดโมเดลถอดเสียงในเครื่อง \
+                 ซึ่งใช้หน่วยความจำเพิ่มราว 1 GB ระหว่างถอด แล้วคืนเมื่อเสร็จ\n\nเลือกไฟล์เลยไหม?",
+                "เลือกไฟล์",
+                "ยกเลิก",
+            );
+            let _ = p.send_event(UserEvent::FileGoAhead(go));
+        });
+    }
+
+    /// The Open panel (macOS: on this thread, the main one; it returns at once). Its answer
+    /// comes back as FileChosen; `dialog_open` is set until then.
+    fn open_file_picker(&mut self) {
+        let p = self.proxy.clone();
+        platform::choose_file("เลือกไฟล์เสียงหรือวิดีโอที่จะถอดเสียง", move |path| {
             let _ = p.send_event(UserEvent::FileChosen(path));
         });
     }
