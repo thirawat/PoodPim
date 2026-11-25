@@ -9,4 +9,9 @@ f -f lavfi -i "testsrc=size=64x64:rate=5:duration=1" -f lavfi -i "sine=frequency
 f -f lavfi -i "testsrc=size=64x64:rate=5:duration=1" -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=1" \
   -map 0:v -map 1:a -c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 48k tone.mov
 f -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=1" -c:a alac tone-alac.m4a
+f -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=1" -ac 2 -c:a libopus -b:a 32k tone.webm
+f -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=1" -c:a libopus -b:a 24k tone.opus
+f -f lavfi -i "testsrc=size=64x64:rate=5:duration=1" -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=1" \
+  -map 0:v -map 1:a -c:v libvpx-vp9 -b:v 20k -c:a libopus -b:a 32k tone-video.webm
+f -f lavfi -i "testsrc=size=64x64:rate=5:duration=1" -c:v libx264 -pix_fmt yuv420p video-only.mp4
 ```

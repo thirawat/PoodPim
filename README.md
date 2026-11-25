@@ -326,6 +326,12 @@ echo "$API_KEY" | poodpim server https://<api-id>.execute-api.ap-southeast-7.ama
 poodpim config                         # show settings (key hidden)
 ```
 
+`transcribe` reads .wav, AAC / ALAC / MP3 in .m4a, .mp3, .mp4 and .mov, and Opus in .webm,
+.mkv and .opus; from a video it takes the first audio track. For a YouTube video, download its
+audio as is (no re-encoding): `yt-dlp -f ba -o "talk.%(ext)s" <url>` gives talk.webm (Opus)
+or talk.m4a (AAC), both readable. An hour of audio takes ~2.5 min on an M3
+and ~1.7 GB of memory.
+
 `POODPIM_TIMING=1` prints mel / encoder / decoder timings.
 
 ## How it works

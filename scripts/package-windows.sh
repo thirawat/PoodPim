@@ -1,7 +1,9 @@
 #!/bin/sh
 # Build dist/PoodPim-<version>-windows.zip from this Mac: cross-compiles PoodPim.exe with
 # cargo-xwin (`cargo install --locked cargo-xwin`; it downloads the MSVC CRT and Windows SDK
-# libraries into target/xwin-cache and accepts Microsoft's license for them), and ships it with
+# libraries into target/xwin-cache and accepts Microsoft's license for them; libopus is built
+# with CMake, which also needs `brew install cmake ninja` and `rustup component add llvm-tools`),
+# and ships it with
 #   - DirectML.dll: the prebuilt ONNX Runtime for Windows always links DirectML, and the
 #     copy in older Windows versions may be too old, so the redistributable goes next to the exe;
 #   - preset.json: local backend, no server URL or API key (see package-macos.sh);
