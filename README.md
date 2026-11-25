@@ -360,6 +360,12 @@ Spokenly code or assets are used.
 
 PoodPim (this code, the logo and the demo): [MIT](LICENSE).
 
+The desktop app builds in libopus (BSD-3-Clause, with Opus's royalty-free patent licences)
+and Symphonia (MPL-2.0, unmodified) to read audio and video files. Their licences, and where
+Symphonia's source is, are in [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt), which the
+macOS app (`Contents/Resources`) and both download zips include. `scripts/make-notices.sh`
+writes it from the crates' own licence files; run it again when those crates are updated.
+
 The speech model is not part of this repository: the app downloads
 OpenThai2.0-ASR-Streaming from Hugging Face, under its own licence, OpenMDW-1.1 (see
 `LICENSE` in the model folder).

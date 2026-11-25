@@ -8,7 +8,8 @@
 #     copy in older Windows versions may be too old, so the redistributable goes next to the exe;
 #   - preset.json: local backend, no server URL or API key (see package-macos.sh);
 #   - README-TH.txt: Thai install guide;
-#   - PoodPim.ico: Start menu shortcut and Settings > Apps icon.
+#   - PoodPim.ico: Start menu shortcut and Settings > Apps icon;
+#   - THIRD-PARTY-NOTICES.txt: licences of libopus and Symphonia (scripts/make-notices.sh).
 # Also writes <zip>.sha256, which install.ps1 and the app's updater check the download against.
 # No PowerShell scripts: the app updates and uninstalls itself.
 # The exe also needs the Visual C++ runtime (msvcp140.dll), present on most PCs; the guide
@@ -42,6 +43,7 @@ cp "target/$TARGET/release/poodpim.exe" "$STAGE/PoodPim.exe"
 cp "$DML_DIR/bin/x64-win/DirectML.dll" "$STAGE/"
 cp "$DML_DIR/LICENSE.txt" "$STAGE/LICENSE-DirectML.txt"
 cp scripts/share/install-th-windows.txt "$STAGE/README-TH.txt"
+cp THIRD-PARTY-NOTICES.txt "$STAGE/"
 cp assets/PoodPim.ico "$STAGE/"
 cat > "$STAGE/preset.json" <<'JSON'
 {
