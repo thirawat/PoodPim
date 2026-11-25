@@ -18,8 +18,10 @@ const USAGE: &str = "poodpim — Thai push-to-talk dictation
 
 USAGE:
   poodpim                         start the tray / menu-bar app
-  poodpim transcribe <wav>... [--thai-only] [--server] [--live | --live-typing] [--vocabulary FILE | --no-vocabulary]
+  poodpim transcribe <file>... [--thai-only] [--server] [--live | --live-typing] [--vocabulary FILE | --no-vocabulary]
                                [--corrections FILE] [--no-digits]
+                                files: .wav, or AAC / ALAC / MP3 audio in .m4a, .mp3, .mp4, .mov
+                                          (a video's first audio track)
                                 --server: send to the configured Lambda instead of the local model
                                 --live:   feed the file in real time like the microphone and report
                                           the wait after release
@@ -201,8 +203,10 @@ fn transcribe(args: &[String]) -> Result<()> {
         })
     };
     for f in files {
-        let audio = audio::load_wav(&f)?;
+        let t_read = Instant::now();
+        let audio = audio::load_audio(&f)?;
         let secs = audio.len() as f32 / features::SAMPLE_RATE as f32;
+        eprintln!("{}: {:.1} min of audio, read in {:.1}s", f.display(), secs / 60.0, t_read.elapsed().as_secs_f32());
         let mut pipe = make_pipeline();
         let t0 = Instant::now();
         *t_file.lock().unwrap() = t0;
@@ -223,6 +227,7 @@ fn transcribe(args: &[String]) -> Result<()> {
             }
         } else if !args.iter().any(|a| a == "--whole") {
             while let Some((s, e)) = seg.poll(&audio) {
+                pipe.wait_below(4);
                 pipe.push(audio[s..e].to_vec());
             }
         }

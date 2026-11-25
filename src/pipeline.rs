@@ -166,6 +166,15 @@ impl Pipeline {
         (self.done.load(Ordering::SeqCst), self.sent)
     }
 
+    /// Waits until fewer than `ahead` queued segments are left to do, so a long file isn't
+    /// queued (copied) whole. Returns at once if the worker has stopped (crashed, cancelled).
+    pub fn wait_below(&self, ahead: usize) {
+        let running = || self.worker.as_ref().is_some_and(|w| !w.is_finished());
+        while self.sent >= self.done.load(Ordering::SeqCst) + ahead && running() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     /// No more segments; returns the worker to join for the result.
     pub fn finish(mut self) -> JoinHandle<Outcome> {
         self.tx = None;
@@ -224,6 +233,17 @@ mod tests {
         assert_eq!(calls, 2);
         assert_eq!(out.errors.len(), 3);
         assert!(out.errors[1].starts_with("skipped"));
+    }
+
+    #[test]
+    fn wait_below_returns_when_the_worker_has_crashed() {
+        let mut p = Pipeline::start(|_: &[f32]| panic!("model crashed"), None, |_: &str| {});
+        for _ in 0..3 {
+            p.push(vec![0.5; 16_000]);
+        }
+        // Without the check this would wait for good: no segment is ever done.
+        p.wait_below(1);
+        assert!(p.finish().join().is_err());
     }
 
     #[test]

@@ -201,6 +201,179 @@ pub fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
     out
 }
 
+/// The same filter as `resample`, fed a piece at a time: for files too long to hold at their
+/// own rate, and too long for `resample` (it works out every weight again for each sample).
+/// Here the weights are worked out once for each of the (to / gcd) positions between input
+/// samples, and only the input still needed is kept.
+pub struct Resampler {
+    /// Output sample n sits at input n · step / phases.
+    step: usize,
+    phases: usize,
+    half: isize,
+    /// Weights for taps k = centre - half + 1 ..= centre + half, `2 · half` per phase.
+    /// Empty when there would be too many: then worked out per sample, as `resample` does.
+    table: Vec<f32>,
+    cutoff: f64,
+    /// Input kept, from absolute sample `base`; `seen` samples so far.
+    buf: Vec<f32>,
+    base: usize,
+    seen: usize,
+    /// The next output sample.
+    next: usize,
+}
+
+impl Resampler {
+    pub fn new(from: u32, to: u32) -> Self {
+        let (mut a, mut b) = (from as usize, to as usize);
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        let (step, phases) = (from as usize / a, to as usize / a);
+        let cutoff = (to as f64 / from as f64).min(1.0) * 0.95;
+        let half = (16.0 / cutoff).ceil() as isize;
+        let taps = 2 * half as usize;
+        let mut r = Self { step, phases, half, table: Vec::new(), cutoff, buf: Vec::new(), base: 0, seen: 0, next: 0 };
+        // Up to 16 MB of weights (44.1 kHz: 160 phases × 102 taps).
+        if from != to && phases * taps <= 4 << 20 {
+            r.table = (0..phases).flat_map(|p| (0..taps).map(move |i| (p, i))).map(|(p, i)| r.weight(p, i) as f32).collect();
+        }
+        r
+    }
+
+    /// Weight of tap `i` (k = centre - half + 1 + i) at phase `p`; `resample`'s formula.
+    fn weight(&self, p: usize, i: usize) -> f64 {
+        let d = p as f64 / self.phases as f64 - (i as isize - self.half + 1) as f64;
+        let x = self.cutoff * d;
+        let sinc = if x.abs() < 1e-9 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
+        let w = 0.5 + 0.5 * (std::f64::consts::PI * d / self.half as f64).cos();
+        self.cutoff * sinc * w
+    }
+
+    /// Adds input; appends the output samples it completes to `out`.
+    pub fn push(&mut self, input: &[f32], out: &mut Vec<f32>) {
+        if self.phases == self.step {
+            out.extend_from_slice(input);
+            return;
+        }
+        self.buf.extend_from_slice(input);
+        self.seen += input.len();
+        // Ready once its last tap has arrived.
+        while (self.next * self.step / self.phases) as isize + self.half < self.seen as isize {
+            out.push(self.sample(self.next));
+            self.next += 1;
+        }
+        let keep_from = ((self.next * self.step / self.phases) as isize - self.half + 1).max(0) as usize;
+        if keep_from > self.base {
+            self.buf.drain(..(keep_from - self.base).min(self.buf.len()));
+            self.base = keep_from;
+        }
+    }
+
+    /// No more input: the rest of the output, the input taken as silent past its end.
+    pub fn finish(mut self, out: &mut Vec<f32>) {
+        if self.phases == self.step {
+            return;
+        }
+        let len = self.seen * self.phases / self.step;
+        while self.next < len {
+            out.push(self.sample(self.next));
+            self.next += 1;
+        }
+    }
+
+    fn sample(&self, n: usize) -> f32 {
+        let (centre, p) = ((n * self.step / self.phases) as isize, n * self.step % self.phases);
+        let first = centre - self.half + 1;
+        let taps = 2 * self.half as usize;
+        let mut acc = 0.0f32;
+        for i in 0..taps {
+            let k = first + i as isize;
+            if k < 0 || k as usize >= self.seen {
+                continue;
+            }
+            let x = self.buf[k as usize - self.base];
+            let w = if self.table.is_empty() { self.weight(p, i) as f32 } else { self.table[p * taps + i] };
+            acc += x * w;
+        }
+        acc
+    }
+}
+
+/// Reads an audio or video file as 16 kHz mono f32: WAV, or AAC / ALAC / MP3 audio in .m4a,
+/// .mp4, .mov or .mp3 (a video's first audio track). Not ALAC in .mov: symphonia 0.6 finds
+/// no audio track in what ffmpeg writes (QuickTime's own screen recordings are AAC).
+#[cfg(feature = "desktop")]
+pub fn load_audio(path: &Path) -> Result<Vec<f32>> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if ext == "wav" {
+        return load_wav(path);
+    }
+    decode_media(path, &ext).with_context(|| format!("reading {}", path.display()))
+}
+
+#[cfg(feature = "desktop")]
+fn decode_media(path: &Path, ext: &str) -> Result<Vec<f32>> {
+    use anyhow::anyhow;
+    use symphonia::core::errors::Error;
+    use symphonia::core::formats::TrackType;
+    use symphonia::core::formats::probe::Hint;
+    use symphonia::core::io::MediaSourceStream;
+
+    let file = std::fs::File::open(path).context("opening it")?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension(ext);
+    let mut format = symphonia::default::get_probe()
+        .probe(&hint, mss, Default::default(), Default::default())
+        .map_err(|e| anyhow!("not an audio or video file it can read ({e})"))?;
+    let track = format.default_track(TrackType::Audio).ok_or_else(|| anyhow!("no audio track it can read (AAC, ALAC or MP3)"))?;
+    let track_id = track.id;
+    let params = track.codec_params.as_ref().and_then(|p| p.audio()).ok_or_else(|| anyhow!("no audio track it can read (AAC, ALAC or MP3)"))?;
+    let mut decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(params, &Default::default())
+        .map_err(|e| anyhow!("its audio can't be decoded ({e})"))?;
+
+    let (mut out, mut interleaved, mut mono) = (Vec::new(), Vec::new(), Vec::new());
+    let mut resampler: Option<(u32, Resampler)> = None;
+    let mut bad_packets = 0usize;
+    loop {
+        let packet = match format.next_packet() {
+            Ok(Some(p)) => p,
+            // The end (a file cut off counts as ending there).
+            Ok(None) | Err(Error::ResetRequired) => break,
+            Err(Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(anyhow!("{e}")),
+        };
+        if packet.track_id != track_id {
+            continue;
+        }
+        let buf = match decoder.decode(&packet) {
+            Ok(b) => b,
+            Err(Error::DecodeError(_)) => {
+                bad_packets += 1;
+                continue;
+            }
+            Err(e) => return Err(anyhow!("{e}")),
+        };
+        let (rate, ch) = (buf.spec().rate(), buf.num_planes().max(1));
+        buf.copy_to_vec_interleaved::<f32>(&mut interleaved);
+        mono.clear();
+        mono.extend(interleaved.chunks(ch).map(|f| f.iter().sum::<f32>() / ch as f32));
+        let (r0, r) = resampler.get_or_insert_with(|| (rate, Resampler::new(rate, SAMPLE_RATE)));
+        if *r0 != rate {
+            return Err(anyhow!("its sample rate changes part way ({r0} → {rate} Hz)"));
+        }
+        r.push(&mono, &mut out);
+    }
+    if let Some((_, r)) = resampler {
+        r.finish(&mut out);
+    }
+    if bad_packets > 0 {
+        eprintln!("{}: {bad_packets} damaged packet(s) skipped", path.display());
+    }
+    Ok(out)
+}
+
 /// Whether any 20 ms frame of `audio` (at `rate`) is louder than -45 dBFS, the level below
 /// which `trim_silence` treats it as silence.
 pub fn has_sound(audio: &[f32], rate: u32) -> bool {
@@ -272,4 +445,70 @@ pub fn encode_wav(audio: &[f32]) -> Vec<u8> {
         w.finalize().expect("wav finalize");
     }
     buf.into_inner()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Resampler, resample};
+
+    fn noise(n: usize) -> Vec<f32> {
+        let mut x = 12345u32;
+        (0..n)
+            .map(|_| {
+                x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+                (x >> 8) as f32 / (1 << 23) as f32 - 1.0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn resampler_matches_resample_fed_in_pieces() {
+        for from in [48_000, 44_100, 22_050, 11_025, 8_000, 16_000] {
+            let input = noise(from as usize / 3);
+            let want = resample(&input, from, 16_000);
+            let (mut r, mut got) = (Resampler::new(from, 16_000), Vec::new());
+            // Uneven pieces, an empty one included.
+            let mut at = 0;
+            for (i, n) in [1usize, 0, 777, 5, 4096, 31].iter().cycle().enumerate() {
+                if at >= input.len() || i > 10_000 {
+                    break;
+                }
+                let end = (at + n).min(input.len());
+                r.push(&input[at..end], &mut got);
+                at = end;
+            }
+            r.finish(&mut got);
+            assert_eq!(got.len(), want.len(), "{from} Hz");
+            let worst = got.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+            assert!(worst < 1e-4, "{from} Hz: off by {worst}");
+        }
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn reads_a_440_hz_tone_from_each_kind_of_file() {
+        // 1 s of 440 Hz: AAC 44.1 kHz stereo, ALAC and MP3, and video files (H.264 first,
+        // then AAC at 48 kHz). Made with ffmpeg, see tests/media/README.md.
+        for name in ["tone.m4a", "tone-alac.m4a", "tone.mp3", "tone.mp4", "tone.mov"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/media").join(name);
+            let audio = super::load_audio(&path).unwrap();
+            let secs = audio.len() as f32 / 16_000.0;
+            // Encoders add a little silence at the start and end (no gapless trimming here).
+            assert!((0.95..1.15).contains(&secs), "{name}: {secs} s");
+            // Count rising zero crossings in the middle half second.
+            let mid = &audio[4_000..12_000];
+            let rising = mid.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
+            assert!((215..=225).contains(&rising), "{name}: {rising} rising crossings in 0.5 s");
+            let peak = mid.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            assert!(peak > 0.05, "{name}: peak {peak}");
+        }
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn a_file_that_is_not_media_is_an_error() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let e = super::load_audio(&path).unwrap_err();
+        assert!(format!("{e:#}").contains("Cargo.toml"), "{e:#}");
+    }
 }

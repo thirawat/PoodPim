@@ -9,7 +9,7 @@ default-run = "poodpim"
 default = ["desktop"]
 # Menu-bar / tray dictation app (macOS, Windows).
 # ONNX Runtime linked statically (prebuilt by the ort crate).
-desktop = ["ort/download-binaries", "dep:arboard", "dep:cpal", "dep:tao", "dep:tray-icon", "dep:ureq", "dep:zip", "dep:sha2", "dep:wry"]
+desktop = ["ort/download-binaries", "dep:symphonia", "dep:arboard", "dep:cpal", "dep:tao", "dep:tray-icon", "dep:ureq", "dep:zip", "dep:sha2", "dep:wry"]
 # AWS Lambda transcription server (Linux, Function URL).
 # ONNX Runtime loaded at run time from $ORT_DYLIB_PATH (Microsoft's official build, set in the image),
 # because the prebuilt static library needs a newer libstdc++ than Amazon Linux 2023 has.
@@ -45,6 +45,7 @@ zip = { version = "9.6.0", default-features = false, features = ["deflate-flate2
 
 lambda_http = { version = "1.3.2", optional = true }
 tokio = { version = "1.54.1", features = ["macros", "rt"], optional = true }
+symphonia = { version = "0.6.1", default-features = false, features = ["aac", "alac", "mp3", "isomp4"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10.1"
