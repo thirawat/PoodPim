@@ -31,9 +31,20 @@ struct TranscribeReply {
     text: String,
 }
 
-fn agent() -> ureq::Agent {
+/// One agent for every request, so its connection is kept: the wake-up call at key-down opens
+/// it and the parts reuse it, instead of each paying DNS + TCP + TLS again (~50-150 ms to
+/// ap-southeast-7, more on mobile or VPN). An idle connection is dropped after 50 s, before
+/// the other end would; a part sent on one that was closed anyway fails fast and is retried
+/// once (pipeline). No thread of its own: nothing runs while idle.
+fn agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::LazyLock<ureq::Agent> = std::sync::LazyLock::new(new_agent);
+    &AGENT
+}
+
+fn new_agent() -> ureq::Agent {
     use ureq::tls::{TlsConfig, TlsProvider};
     ureq::Agent::config_builder()
+        .max_idle_age(Duration::from_secs(50))
         .tls_config(TlsConfig::builder().provider(TlsProvider::NativeTls).build())
         .timeout_global(Some(Duration::from_secs(90)))
         // No network (VPN dropped, captive portal): fail in seconds, not after the 90.

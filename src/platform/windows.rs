@@ -453,6 +453,17 @@ fn open_dialog(prompt: &str) -> Option<std::path::PathBuf> {
     Some(std::ffi::OsString::from_wide(&buf[..len]).into())
 }
 
+/// Two text prompts, the second's message made with the first answer (`before` + answer +
+/// `after`). None if either is cancelled or left empty.
+pub fn ask_text_then(message: &str, default: &str, before: &str, after: &str) -> Option<(String, String)> {
+    let first = input_box(message, default, false)?.trim().to_string();
+    if first.is_empty() {
+        return None;
+    }
+    let second = input_box(&format!("{before}{first}{after}"), "", false)?.trim().to_string();
+    (!second.is_empty()).then_some((first, second))
+}
+
 pub fn ask_api_key(message: &str) -> Option<String> {
     input_box(message, "", true)
 }
@@ -477,22 +488,32 @@ pub fn redirect_stderr(file: std::fs::File) {
 pub const ALREADY_RUNNING: &str = "PoodPim เปิดอยู่แล้ว\n\nไอคอนไมโครโฟนอยู่ที่มุมขวาล่างของจอ (ข้างนาฬิกา) \
 ถ้าไม่เห็น ให้กดลูกศร ^ ข้างนาฬิกา\n\nกด Alt ขวาค้างไว้เพื่อพูดได้เลย";
 
-/// A message box with an OK button. Returns when it is closed.
+/// A message box with an OK button. Returns when it is closed. Topmost, as `input_box` is: one
+/// that comes without a click (a file job done, an update) shouldn't open behind the window in use.
 pub fn alert(message: &str) {
-    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MessageBoxW};
+    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MessageBoxW};
     use windows::core::HSTRING;
     unsafe {
-        MessageBoxW(None, &HSTRING::from(message), &HSTRING::from("PoodPim"), MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
+        MessageBoxW(
+            None,
+            &HSTRING::from(message),
+            &HSTRING::from("PoodPim"),
+            MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST,
+        );
     }
 }
 
 /// An OK / Cancel message box. True for OK.
 pub fn confirm(message: &str, _ok: &str, _cancel: &str) -> bool {
-    use windows::Win32::UI::WindowsAndMessaging::{IDOK, MB_ICONQUESTION, MB_OKCANCEL, MB_SETFOREGROUND, MessageBoxW};
+    use windows::Win32::UI::WindowsAndMessaging::{IDOK, MB_ICONQUESTION, MB_OKCANCEL, MB_SETFOREGROUND, MB_TOPMOST, MessageBoxW};
     use windows::core::HSTRING;
     unsafe {
-        MessageBoxW(None, &HSTRING::from(message), &HSTRING::from("PoodPim"), MB_OKCANCEL | MB_ICONQUESTION | MB_SETFOREGROUND)
-            == IDOK
+        MessageBoxW(
+            None,
+            &HSTRING::from(message),
+            &HSTRING::from("PoodPim"),
+            MB_OKCANCEL | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST,
+        ) == IDOK
     }
 }
 

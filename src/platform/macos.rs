@@ -463,14 +463,62 @@ pub fn open_permission_settings() {
         .spawn();
 }
 
-/// Asks for the Lambda URL and API key with two native dialogs (osascript).
-/// Returns None if cancelled. An empty key answer keeps `current_key`.
+/// Asks for the Lambda URL and API key: two prompts from one osascript (its `activate` takes
+/// ~2 s, paid once). Returns None if cancelled. An empty key answer keeps `current_key`.
 pub fn ask_server_settings(current_url: &str, current_key: &str) -> Option<(String, String)> {
-    let url = osascript_prompt(super::URL_PROMPT, current_url, false)?;
     let hint = if current_key.is_empty() { super::KEY_PROMPT } else { super::KEY_KEEP_PROMPT };
-    let key = osascript_prompt(hint, "", true)?;
+    let (url, key) = osascript_two_prompts(super::URL_PROMPT, current_url, hint, "", true)?;
     let key = if key.trim().is_empty() { current_key.to_string() } else { key };
     Some((url.trim().to_string(), key.trim().to_string()))
+}
+
+/// Two text prompts, the second's message made with the first answer: `before` + answer +
+/// `after`. One osascript for both (one `activate`, ~2 s, instead of two). None if either is
+/// cancelled or left empty.
+pub fn ask_text_then(message: &str, default: &str, before: &str, after: &str) -> Option<(String, String)> {
+    let (a, b) = osascript_two_prompts(message, default, before, after, false)?;
+    let (a, b) = (a.trim().to_string(), b.trim().to_string());
+    (!a.is_empty() && !b.is_empty()).then_some((a, b))
+}
+
+/// The first prompt (`message`, `default`), then the second, whose message is `before` + the
+/// first answer + `after` (with an empty `after` and `hidden`: the second is a hidden answer,
+/// its message `before`). Text goes in as argv, never as AppleScript.
+fn osascript_two_prompts(message: &str, default: &str, before: &str, after: &str, hidden: bool) -> Option<(String, String)> {
+    let second = if hidden {
+        "set b to text returned of (display dialog (item 3 of argv) default answer \"\" with title \"PoodPim\" with hidden answer)"
+    } else {
+        "set b to text returned of (display dialog ((item 3 of argv) & a & (item 4 of argv)) default answer \"\" with title \"PoodPim\")"
+    };
+    let out = std::process::Command::new("osascript")
+        .args([
+            "-e",
+            "on run argv",
+            "-e",
+            "activate",
+            "-e",
+            "set a to text returned of (display dialog (item 1 of argv) default answer (item 2 of argv) with title \"PoodPim\")",
+            "-e",
+            "if a is \"\" then error number -128",
+            "-e",
+            second,
+            "-e",
+            "return a & (character id 31) & b",
+            "-e",
+            "end run",
+            message,
+            default,
+            before,
+            after,
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None; // cancelled
+    }
+    let text = String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_string();
+    let (a, b) = text.split_once('\u{1f}')?;
+    Some((a.to_string(), b.to_string()))
 }
 
 /// Asks for the API key only (typed hidden). None if cancelled or left empty.
@@ -481,22 +529,70 @@ pub fn ask_api_key(message: &str) -> Option<String> {
 
 /// A message with an OK button. Returns when it is closed.
 pub fn alert(message: &str) {
-    let dialog = "display dialog (item 1 of argv) with title \"PoodPim\" buttons {\"OK\"} default button 1";
-    let _ = std::process::Command::new("osascript")
-        .args(["-e", "on run argv", "-e", "activate", "-e", dialog, "-e", "end run", message])
-        .output();
+    notification_alert(message, "OK", None);
 }
 
 /// A two-button dialog. True if the user picked `ok`.
 pub fn confirm(message: &str, ok: &str, cancel: &str) -> bool {
-    let dialog = "display dialog (item 1 of argv) with title \"PoodPim\" buttons {(item 3 of argv), (item 2 of argv)} default button 2 cancel button 1";
-    let Ok(out) = std::process::Command::new("osascript")
-        .args(["-e", "on run argv", "-e", "activate", "-e", dialog, "-e", "return button returned of result", "-e", "end run", message, ok, cancel])
-        .output()
-    else {
-        return false;
+    notification_alert(message, ok, Some(cancel))
+}
+
+/// A dialog shown by the system (CFUserNotification): it is up in ~10 ms, where osascript's
+/// `activate` took ~2 s. Blocks until a button is pressed; true for `default`. Floats above
+/// other windows and can be called from any thread. Not for text fields: the agent showing it
+/// has no Edit menu, so ⌘V wouldn't paste (the prompts stay on osascript).
+fn notification_alert(message: &str, default: &str, alternate: Option<&str>) -> bool {
+    use core_foundation::base::TCFType;
+    use core_foundation::string::CFString;
+    use core_foundation::url::CFURL;
+    use std::ffi::c_void;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFUserNotificationDisplayAlert(
+            timeout: f64,
+            flags: usize,
+            icon_url: *const c_void,
+            sound_url: *const c_void,
+            localization_url: *const c_void,
+            header: *const c_void,
+            message: *const c_void,
+            default_button: *const c_void,
+            alternate_button: *const c_void,
+            other_button: *const c_void,
+            response_flags: *mut usize,
+        ) -> i32;
+    }
+    const NOTE_ALERT_LEVEL: usize = 1;
+    const PLAIN_ALERT_LEVEL: usize = 3;
+    const DEFAULT_RESPONSE: usize = 0;
+
+    // The app's own icon when running from PoodPim.app; the system's note icon otherwise.
+    let icon = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.join("Resources/AppIcon.icns")))
+        .filter(|p| p.is_file())
+        .and_then(|p| CFURL::from_path(&p, false));
+    let flags = if icon.is_some() { PLAIN_ALERT_LEVEL } else { NOTE_ALERT_LEVEL };
+    let (header, text, ok) = (CFString::new("PoodPim"), CFString::new(message), CFString::new(default));
+    let cancel = alternate.map(CFString::new);
+    let mut response = 0usize;
+    let r = unsafe {
+        CFUserNotificationDisplayAlert(
+            0.0,
+            flags,
+            icon.as_ref().map_or(std::ptr::null(), |u| u.as_concrete_TypeRef() as *const c_void),
+            std::ptr::null(),
+            std::ptr::null(),
+            header.as_concrete_TypeRef() as *const c_void,
+            text.as_concrete_TypeRef() as *const c_void,
+            ok.as_concrete_TypeRef() as *const c_void,
+            cancel.as_ref().map_or(std::ptr::null(), |c| c.as_concrete_TypeRef() as *const c_void),
+            std::ptr::null(),
+            &mut response,
+        )
     };
-    out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == ok
+    r == 0 && response & 0x3 == DEFAULT_RESPONSE
 }
 
 /// Asks for a file to open (any kind: what can't be read is reported when reading it) with
@@ -505,7 +601,7 @@ pub fn confirm(message: &str, ok: &str, cancel: &str) -> bool {
 /// gets the file, or None if cancelled, on the main thread when the panel closes.
 pub fn choose_file(prompt: &str, done: impl FnOnce(Option<std::path::PathBuf>) + Send + 'static) {
     use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSModalResponse, NSModalResponseOK, NSOpenPanel};
+    use objc2_app_kit::{NSApplication, NSApplicationActivationOptions, NSModalResponse, NSModalResponseOK, NSOpenPanel, NSWorkspace};
     use objc2_foundation::NSString;
 
     let Some(mtm) = MainThreadMarker::new() else {
@@ -517,18 +613,32 @@ pub fn choose_file(prompt: &str, done: impl FnOnce(Option<std::path::PathBuf>) +
     panel.setCanChooseDirectories(false);
     panel.setAllowsMultipleSelection(false);
     panel.setMessage(Some(&NSString::from_str(prompt)));
+    // The app the user was in, to give the keyboard back to when the panel closes: else this
+    // menu-bar app stays frontmost and the next dictation has nowhere to paste. Not when it is
+    // this app already (the Settings window).
+    let own_pid = std::process::id() as i32;
+    let previous = NSWorkspace::sharedWorkspace().frontmostApplication().filter(|a| a.processIdentifier() != own_pid);
     // A menu-bar app isn't frontmost: without this the panel opens behind the window in use.
     #[allow(deprecated)] // activate() is macOS 14+; the app runs on 13.4
     NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
-    // The block is Fn and called once; the panel keeps it (and the block the panel) until then.
+    // The block is Fn and called once. The panel keeps the block until then, and the block the
+    // panel only until it is called (taken out of the Cell): no cycle left either way.
     let done = std::cell::Cell::new(Some(done));
-    let p = panel.clone();
+    let own = std::cell::Cell::new(Some(panel.clone()));
+    let previous = std::cell::Cell::new(previous);
     let handler = block2::RcBlock::new(move |response: NSModalResponse| {
-        let path = (response == NSModalResponseOK)
-            .then(|| p.URLs().firstObject())
-            .flatten()
+        let panel = own.take();
+        let path = panel
+            .filter(|_| response == NSModalResponseOK)
+            .and_then(|p| p.URLs().firstObject())
             .and_then(|url| url.path())
             .map(|path| std::path::PathBuf::from(path.to_string()));
+        // Only while this app is still frontmost: the user may have gone to another one meanwhile.
+        if let Some(app) = previous.take()
+            && NSApplication::sharedApplication(mtm).isActive()
+        {
+            app.activateWithOptions(NSApplicationActivationOptions::empty());
+        }
         if let Some(done) = done.take() {
             done(path);
         }
