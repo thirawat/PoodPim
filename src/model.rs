@@ -45,6 +45,40 @@ pub fn app_dir(base: Option<PathBuf>) -> PathBuf {
     dir
 }
 
+/// Makes sure `dir` (a data folder from `app_dir`) exists. People move it to another drive
+/// and leave a link in its place; if what the link points to was deleted, it is made again
+/// (the model is then downloaded again). Not when the drive it is on isn't there (an
+/// external drive not plugged in): that would make the folder on the internal disk instead.
+/// The error says what is wrong, for the user. Ok(Some(where)): the linked folder was made again.
+pub fn ensure_dir(dir: &Path) -> Result<Option<PathBuf>, String> {
+    let made = std::fs::create_dir_all(dir);
+    if dir.is_dir() {
+        return Ok(None);
+    }
+    let is_link = std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink());
+    let target = is_link.then(|| std::fs::read_link(dir).ok()).flatten().map(|t| dir.parent().unwrap_or(dir).join(t));
+    let Some(target) = target else {
+        let why = made.err().map_or_else(|| "it isn't a folder".to_string(), |e| e.to_string());
+        return Err(format!("PoodPim ใช้โฟลเดอร์เก็บข้อมูล {} ไม่ได้ ({why})", dir.display()));
+    };
+    // The nearest folder on the way that is there: a drive's top folder (or /Volumes) means
+    // the drive itself is missing.
+    let present = target.ancestors().skip(1).find(|a| a.is_dir());
+    let drive_missing = present.is_none_or(|a| a.parent().is_none() || a == Path::new("/Volumes"));
+    if drive_missing {
+        return Err(format!(
+            "โฟลเดอร์เก็บข้อมูลของ PoodPim ({}) เป็นทางลัดไปที่\n{}\nซึ่งตอนนี้ไม่มีอยู่ (ไดรฟ์ไม่ได้เสียบอยู่?)\n\n\
+             เสียบไดรฟ์นั้นแล้วเปิด PoodPim ใหม่ หรือลบทางลัดนี้ทิ้งเพื่อเริ่มใหม่ในเครื่อง (ต้องดาวน์โหลดโมเดลอีกครั้ง)",
+            dir.display(),
+            target.display()
+        ));
+    }
+    std::fs::create_dir_all(&target).map_err(|e| {
+        format!("โฟลเดอร์เก็บข้อมูลของ PoodPim ({}) เป็นทางลัดไปที่ {} ซึ่งถูกลบไป และสร้างใหม่ไม่ได้ ({e})", dir.display(), target.display())
+    })?;
+    Ok(Some(target))
+}
+
 pub fn is_ready(dir: &Path) -> bool {
     REQUIRED.iter().all(|f| dir.join(f).is_file()) && encoder_path(dir).is_some()
 }
@@ -269,4 +303,50 @@ fn sha256_of(path: &Path) -> Result<String> {
     }
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_dir;
+    use std::path::PathBuf;
+
+    fn temp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("poodpim-model-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn makes_the_folder() {
+        let d = temp("plain");
+        ensure_dir(&d.join("poodpim")).unwrap();
+        assert!(d.join("poodpim").is_dir());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_deleted_folder_gets_the_folder_back() {
+        // As on the user's Mac: the folder the link went to was deleted with its parent.
+        let d = temp("deleted");
+        let link = d.join("poodpim");
+        let target = d.join("offload/model-cache/poodpim");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(ensure_dir(&link).unwrap(), Some(target.clone()));
+        assert!(target.is_dir() && link.is_dir());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_drive_that_isnt_there_is_an_error() {
+        let d = temp("unplugged");
+        let link = d.join("poodpim");
+        std::os::unix::fs::symlink("/Volumes/poodpim-no-such-drive/data/poodpim", &link).unwrap();
+        let e = ensure_dir(&link).unwrap_err();
+        assert!(e.contains("/Volumes/poodpim-no-such-drive/data/poodpim"), "{e}");
+        assert!(!std::path::Path::new("/Volumes/poodpim-no-such-drive").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

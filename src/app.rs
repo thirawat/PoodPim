@@ -284,17 +284,28 @@ struct App {
     file_name: String,
 }
 
-/// Locks a file in the settings folder; None if another copy of the app holds it.
-fn single_instance() -> Option<std::fs::File> {
-    let dir = model::app_dir(dirs::config_dir());
-    let _ = std::fs::create_dir_all(&dir);
-    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("app.lock")).ok()?;
+enum Instance {
+    /// This copy holds the lock: keep the file open while running.
+    Only(std::fs::File),
+    /// Another copy of the app holds it.
+    Running,
+    /// The lock file can't be opened (the settings folder can't be written): why, for the user.
+    Broken(String),
+}
+
+/// Locks a file in the settings folder, so a second copy of the app can tell.
+fn single_instance() -> Instance {
+    let path = model::app_dir(dirs::config_dir()).join("app.lock");
+    let file = match std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path) {
+        Ok(f) => f,
+        Err(e) => return Instance::Broken(format!("PoodPim เปิดไฟล์ {} ไม่ได้ ({e})", path.display())),
+    };
     match file.try_lock() {
-        Ok(()) => Some(file),
-        Err(std::fs::TryLockError::WouldBlock) => None,
+        Ok(()) => Instance::Only(file),
+        Err(std::fs::TryLockError::WouldBlock) => Instance::Running,
         Err(std::fs::TryLockError::Error(e)) => {
             eprintln!("instance lock: {e}"); // can't tell; start anyway
-            Some(file)
+            Instance::Only(file)
         }
     }
 }
@@ -320,25 +331,50 @@ pub(crate) fn said(text: &str) -> &str {
 }
 
 pub fn run() -> Result<()> {
-    log_to_file();
-    eprintln!("PoodPim {} ({} {})", update::CURRENT, std::env::consts::OS, std::env::consts::ARCH);
-    update::clean_up_after_update();
+    // The settings and model folders, which may be links to another drive (see ensure_dir).
+    let mut remade = Vec::new();
+    for dir in [model::app_dir(dirs::config_dir()), model::app_dir(dirs::data_dir())] {
+        match model::ensure_dir(&dir) {
+            Ok(Some(target)) => remade.push(format!("{} pointed to {}, which was gone: made it again", dir.display(), target.display())),
+            Ok(None) => {}
+            Err(why) => {
+                eprintln!("{why}");
+                platform::alert(&why);
+                return Ok(());
+            }
+        }
+    }
     // Just updated: the old copy is still quitting, so wait for its lock rather than report it.
     let mut lock = single_instance();
     if std::env::var_os(update::UPDATED_ENV).is_some() {
         for _ in 0..75 {
-            if lock.is_some() {
+            if !matches!(lock, Instance::Running) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(200));
             lock = single_instance();
         }
     }
-    let Some(instance_lock) = lock else {
+    let instance_lock = match lock {
+        Instance::Only(file) => file,
         // Opened again while running (often because the menu-bar icon is hidden): say so.
-        platform::alert(platform::ALREADY_RUNNING);
-        return Ok(());
+        Instance::Running => {
+            platform::alert(platform::ALREADY_RUNNING);
+            return Ok(());
+        }
+        Instance::Broken(why) => {
+            eprintln!("{why}");
+            platform::alert(&why);
+            return Ok(());
+        }
     };
+    // Only now: a second copy started by mistake must not empty the running one's log.
+    log_to_file();
+    eprintln!("PoodPim {} ({} {})", update::CURRENT, std::env::consts::OS, std::env::consts::ARCH);
+    for note in remade {
+        eprintln!("{note}");
+    }
+    update::clean_up_after_update();
     #[allow(unused_mut)]
     let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     #[cfg(target_os = "macos")]
