@@ -135,6 +135,11 @@ $P = "$env:LOCALAPPDATA\Programs\PoodPim\PoodPim.exe"
 Start-Process $P -ArgumentList 'transcribe','meeting.m4a' -Wait -NoNewWindow -RedirectStandardOutput out.txt
 ```
 
+PoodPim.exe is a windowed app, so on Windows use `Start-Process … -Wait` as above:
+`& $P transcribe f > out.txt` and `cmd /c` return at once, before the text is written. Put a
+file name with spaces in double quotes inside the single ones: `'"my talk.m4a"'`. out.txt is
+UTF-8.
+
 What a program needs to know:
 
 - **Output:** one line per file on stdout, tab-separated: file, audio length, parts, time

@@ -10,6 +10,25 @@ use poodpim::segment::Segmenter;
 use poodpim::{app, asr, audio, features, model};
 
 use std::path::PathBuf;
+
+/// `println!` for the CLI's output, which may go to a pipe or file that is gone (PowerShell 7
+/// doesn't wait for a GUI-subsystem exe, so `& PoodPim.exe transcribe f > out.txt` closes the
+/// pipe while it runs; `| head` does the same). `println!` panics then; this stops quietly
+/// with exit code 1, as nothing more can reach the reader.
+macro_rules! out {
+    ($($arg:tt)*) => { write_out(format_args!($($arg)*)) };
+}
+
+fn write_out(line: std::fmt::Arguments) {
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    if let Err(e) = stdout.write_fmt(line).and_then(|()| stdout.write_all(b"\n")).and_then(|()| stdout.flush()) {
+        if e.kind() != std::io::ErrorKind::BrokenPipe {
+            let _ = writeln!(std::io::stderr(), "can't write the output: {e}");
+        }
+        std::process::exit(1);
+    }
+}
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
@@ -56,7 +75,7 @@ fn main() -> Result<()> {
         Some("postprocess") => postprocess(&args[1..]),
         Some("download") if args.get(1).map(String::as_str) == Some("--check") => {
             for (f, size) in model::remote_sizes()? {
-                println!("{f}\t{:.1} MB", size as f64 / 1e6);
+                out!("{f}\t{:.1} MB", size as f64 / 1e6);
             }
             Ok(())
         }
@@ -93,7 +112,7 @@ fn main() -> Result<()> {
         #[cfg(windows)]
         Some("--uninstall") => uninstall(),
         Some("-h" | "--help" | "help") => {
-            println!("{USAGE}");
+            out!("{USAGE}");
             Ok(())
         }
         Some(other) => Err(anyhow!("unknown command `{other}`\n\n{USAGE}")),
@@ -102,12 +121,12 @@ fn main() -> Result<()> {
 
 fn show_config(cfg: &Config) {
     let key = if cfg.api_key.is_empty() { "(not set)".to_string() } else { format!("set ({} chars)", cfg.api_key.len()) };
-    println!("config:     {}", poodpim::config::path().display());
-    println!("backend:    {:?}", cfg.backend);
-    println!("server_url: {}", if cfg.server_url.is_empty() { "(not set)" } else { &cfg.server_url });
-    println!("api_key:    {key}");
-    println!("vocabulary: {}", poodpim::hotwords::user_file().display());
-    println!("corrections: {}", poodpim::corrections::user_file().display());
+    out!("config:     {}", poodpim::config::path().display());
+    out!("backend:    {:?}", cfg.backend);
+    out!("server_url: {}", if cfg.server_url.is_empty() { "(not set)" } else { &cfg.server_url });
+    out!("api_key:    {key}");
+    out!("vocabulary: {}", poodpim::hotwords::user_file().display());
+    out!("corrections: {}", poodpim::corrections::user_file().display());
 }
 
 /// Applies the app's text clean-up to lines of text from stdin (to compare other models'
@@ -130,7 +149,7 @@ fn postprocess(args: &[String]) -> Result<()> {
         let text = line?.replace("\u{0E4D}\u{0E32}", "\u{0E33}");
         let text = poodpim::hotwords::thai_acronyms_to_latin(&text);
         let text = vocabulary.canonical_case(&vocabulary.fix_doubled_letters(&text));
-        println!("{}", poodpim::corrections::finish(text.trim(), &fixes, !args.iter().any(|a| a == "--no-digits")));
+        out!("{}", poodpim::corrections::finish(text.trim(), &fixes, !args.iter().any(|a| a == "--no-digits")));
     }
     Ok(())
 }
@@ -254,7 +273,7 @@ fn transcribe(args: &[String]) -> Result<()> {
         pipe.push(audio[seg.start()..].to_vec());
         let out = pipe.finish().join().map_err(|_| anyhow!("worker crashed"))?;
         let wait = if live { released.elapsed() } else { t0.elapsed() };
-        println!(
+        out!(
             "{}\t{secs:.1}s audio\t{} segment(s)\t{}{:.2}s\t{}",
             f.display(),
             out.segments,
@@ -301,10 +320,10 @@ fn uninstall() -> Result<()> {
 fn download() -> Result<()> {
     let dir = model::model_dir();
     if model::is_ready(&dir) {
-        println!("model already in {}", dir.display());
+        out!("model already in {}", dir.display());
         return Ok(());
     }
-    println!("downloading to {}", dir.display());
+    out!("downloading to {}", dir.display());
     let last = std::cell::Cell::new(0u64);
     model::download(&dir, &|done, total| {
         let pct = (done * 100).checked_div(total).unwrap_or(0);

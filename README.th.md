@@ -137,6 +137,8 @@ $P = "$env:LOCALAPPDATA\Programs\PoodPim\PoodPim.exe"
 Start-Process $P -ArgumentList 'transcribe','meeting.m4a' -Wait -NoNewWindow -RedirectStandardOutput out.txt
 ```
 
+PoodPim.exe เป็นแอปแบบมีหน้าต่าง บน Windows จึงต้องเรียกผ่าน `Start-Process … -Wait` แบบด้านบน ถ้าเรียกแบบ `& $P transcribe ไฟล์ > out.txt` หรือผ่าน `cmd /c` คำสั่งจะจบทันทีก่อนข้อความถูกเขียน ชื่อไฟล์ที่มีช่องว่างให้ใส่ฟันหนูไว้ข้างในเครื่องหมาย ' อีกชั้น เช่น `'"my talk.m4a"'` ไฟล์ out.txt เป็น UTF-8
+
 สิ่งที่ AI หรือสคริปต์ควรรู้:
 - **ผลลัพธ์** ออกทาง stdout ไฟล์ละหนึ่งบรรทัด คั่นด้วย tab: ชื่อไฟล์, ความยาวเสียง, จำนวนท่อน, เวลาที่ใช้ถอด, ข้อความ
 - **ความคืบหน้าและ error** ออกทาง stderr ถ้ามีไฟล์ไหนอ่านไม่ได้หรืออ่านได้ไม่ครบ คำสั่งจะจบด้วย exit code 1 (ไฟล์อื่นยังถูกถอดตามปกติ)
