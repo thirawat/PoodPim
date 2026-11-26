@@ -48,7 +48,7 @@ same key in its config file, mode 600).
 | `POST /warm` | load the model if this instance is cold → `{"load_ms": n}` |
 | `POST /transcribe?mixed=1` | body: WAV ≤ 120 s → `{"text", "audio_s", "ms"}` (413 if longer) |
 
-The app sends ≤ 25 s segments cut at pauses (see the main README), so requests stay far
+The app sends ≤ 25 s segments cut at pauses (see [docs/how-it-works.md](../../docs/how-it-works.md#long-dictation)), so requests stay far
 below Lambda's 6 MB payload limit and API Gateway's 30 s timeout.
 
 The app calls `/warm` when the talk key goes down (so a cold start overlaps with

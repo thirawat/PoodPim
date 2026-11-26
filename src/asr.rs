@@ -16,7 +16,7 @@ const PROMPT_THAI_ENGLISH: i64 = 63;
 const ENC_DIM: usize = 1024;
 const STATE_LEN: usize = 2 * 640; // [2, 1, 640]
 const MAX_SYMBOLS_PER_FRAME: usize = 10;
-/// Default for `pause_frames` (80 ms each), tuned on tools/asr-eval (see README).
+/// Default for `pause_frames` (80 ms each), tuned on tools/asr-eval (see docs/how-it-works.md).
 const PAUSE_FRAMES: u32 = 8;
 
 /// The shortest silence (ms) that makes a pause between two words. On the BA clips: 300 ms
