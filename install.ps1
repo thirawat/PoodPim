@@ -42,7 +42,6 @@ $Dir = [IO.Path]::GetFullPath($Dir)
 $Parent = Split-Path $Dir -Parent
 $Exe = Join-Path $Dir 'PoodPim.exe'
 New-Item -ItemType Directory -Force -Path $Parent | Out-Null
-Set-Location $env:TEMP # a folder can't be renamed while it is the working directory
 
 $Tmp = Join-Path $env:TEMP "poodpim-install-$PID"
 $Stage = Join-Path $Parent ".PoodPim-install-$PID" # same drive as $Dir, so it can be moved in
@@ -51,6 +50,9 @@ $Old = Join-Path $Parent ".PoodPim-old-$PID"
 # PoodPim running again.
 $Reopen = [bool]$env:POODPIM_APP
 $Done = $false
+# A folder can't be renamed while it is the working directory. Under `irm | iex` this runs in
+# the user's own session, so their folder is given back at the end (below).
+Push-Location $env:TEMP
 try {
     New-Item -ItemType Directory -Force -Path $Tmp | Out-Null
     Write-Host "Downloading PoodPim $Version..."
@@ -164,4 +166,6 @@ finally {
     Remove-Item -Recurse -Force $Tmp, $Stage -ErrorAction SilentlyContinue
     # The old copy was closed: start it again if the new one didn't go in.
     if ($Reopen -and -not $Done -and (Test-Path $Exe)) { Start-Process -FilePath $Exe -WorkingDirectory $Dir }
+    # Back to the user's folder; it may be gone (the old copy), then stay in TEMP.
+    try { Pop-Location } catch {}
 }
