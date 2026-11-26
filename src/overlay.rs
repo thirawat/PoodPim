@@ -35,6 +35,10 @@ pub enum Phase {
     FileBusy,
     /// A file has been transcribed (a dialog says where the text is).
     FileDone,
+    /// The talk key was pressed while the model is still loading (e.g. just after login).
+    ModelLoading,
+    /// The talk key was pressed while the model is being downloaded.
+    ModelDownloading,
 }
 
 impl Phase {
@@ -59,6 +63,8 @@ impl Phase {
             Phase::FileStarted => "เริ่มถอดเสียงจากไฟล์ ดูความคืบหน้าในเมนู 🎙".into(),
             Phase::FileBusy => "กำลังถอดเสียงจากไฟล์ พูดได้เมื่อเสร็จ หรือกดยกเลิกในเมนู 🎙".into(),
             Phase::FileDone => "✓ ถอดเสียงจากไฟล์เสร็จแล้ว".into(),
+            Phase::ModelLoading => "กำลังโหลดโมเดลถอดเสียง อีกสักครู่ค่อยกดพูด".into(),
+            Phase::ModelDownloading => "กำลังดาวน์โหลดโมเดล ดูความคืบหน้าในเมนู 🎙".into(),
         }
     }
 
@@ -68,7 +74,12 @@ impl Phase {
             Phase::Done => Some(Duration::from_millis(900)),
             Phase::NoSpeech | Phase::Cancelled => Some(Duration::from_millis(1200)),
             Phase::Failed | Phase::Copied { .. } | Phase::MicLost | Phase::MicSilent => Some(Duration::from_millis(3500)),
-            Phase::Ready | Phase::FileStarted | Phase::FileBusy | Phase::FileDone => Some(Duration::from_millis(3000)),
+            Phase::Ready
+            | Phase::FileStarted
+            | Phase::FileBusy
+            | Phase::FileDone
+            | Phase::ModelLoading
+            | Phase::ModelDownloading => Some(Duration::from_millis(3000)),
             _ => None,
         }
     }
@@ -76,7 +87,12 @@ impl Phase {
     fn rgb(&self) -> [f64; 3] {
         match self {
             Phase::Listening { .. } => [1.0, 0.27, 0.23],
-            Phase::Working | Phase::StillWorking | Phase::FileStarted | Phase::FileBusy => [1.0, 0.70, 0.25],
+            Phase::Working
+            | Phase::StillWorking
+            | Phase::FileStarted
+            | Phase::FileBusy
+            | Phase::ModelLoading
+            | Phase::ModelDownloading => [1.0, 0.70, 0.25],
             Phase::Done | Phase::Ready | Phase::FileDone => [0.20, 0.84, 0.29],
             Phase::Copied { .. } | Phase::MicLost | Phase::MicSilent => [1.0, 0.70, 0.25],
             Phase::Failed => [1.0, 0.27, 0.23],

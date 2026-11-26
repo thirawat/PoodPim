@@ -20,7 +20,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Sub
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::asr::OpenThaiAsr;
-use crate::audio::{Recorder, has_sound, resample};
+use crate::audio::{Recorder, has_sound, resample_fast};
 use crate::config::{Backend, Config};
 use crate::features::SAMPLE_RATE;
 use crate::pipeline::{Outcome, Pipeline};
@@ -111,6 +111,8 @@ enum UserEvent {
     ModelUpgradeAnswer(bool),
     ModelUpgradeProgress(u64, u64),
     ModelUpgradeDone(Result<(), String>),
+    /// The Serverless-backend notice before "Transcribe a file…" was answered: true = go on.
+    FileGoAhead(bool),
     /// From "Transcribe a file…": the file picked, or None if cancelled.
     FileChosen(Option<std::path::PathBuf>),
     /// How far file job n is (sent when reading starts and when a part is done).
@@ -151,6 +153,18 @@ struct Ui {
     /// Whether `permission` / `download` are in the menu now (only while they are needed).
     shown_permission: std::cell::Cell<bool>,
     shown_download: std::cell::Cell<bool>,
+    /// What the icon and menu items show now: `refresh` runs on every event and every 100 ms
+    /// while recording, and only changes what differs (a new icon is drawn and, on macOS,
+    /// encoded to PNG; on Windows each change is a call into Explorer).
+    shown: std::cell::RefCell<Shown>,
+}
+
+#[derive(Default)]
+struct Shown {
+    icon: Option<State>,
+    status: String,
+    paste_last: Option<bool>,
+    transcribe_file: Option<(String, bool)>,
 }
 
 struct App {
@@ -282,6 +296,8 @@ struct App {
     file_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// The name of the file being transcribed (for the menu).
     file_name: String,
+    /// "Check for updates" is waiting for GitHub (a second click does nothing meanwhile).
+    update_checking: bool,
 }
 
 enum Instance {
@@ -463,6 +479,7 @@ pub fn run() -> Result<()> {
         file_gen: 0,
         file_cancel: None,
         file_name: String::new(),
+        update_checking: false,
     };
     app.reload_vocabulary();
     let mut ui: Option<Ui> = None;
@@ -649,6 +666,7 @@ fn build_ui() -> Ui {
         quit,
         shown_permission: Default::default(),
         shown_download: Default::default(),
+        shown: Default::default(),
     }
 }
 
@@ -798,7 +816,9 @@ impl App {
         self.status_text = "Loading OpenThai ASR…".into();
         let (p, generation) = (self.proxy.clone(), self.load_gen);
         std::thread::spawn(move || {
+            let t = Instant::now();
             let r = OpenThaiAsr::load(&dir).map(|a| Arc::new(Mutex::new(a))).map_err(|e| format!("{e:#}"));
+            eprintln!("model loaded in {:.1} s (with warm-up)", t.elapsed().as_secs_f32());
             let _ = p.send_event(UserEvent::ModelLoaded(generation, r));
         });
     }
@@ -1020,11 +1040,16 @@ impl App {
                     self.pending_update = Some(tag);
                 }
             }
-            UserEvent::UpdateChecked(r) => match r {
-                Ok(Some(tag)) => self.pending_update = Some(tag),
-                Ok(None) => show_alert(format!("PoodPim {} เป็นเวอร์ชันล่าสุดแล้ว", update::CURRENT)),
-                Err(e) => show_alert(format!("เช็คอัปเดตไม่ได้: {e}")),
-            },
+            UserEvent::UpdateChecked(r) => {
+                self.update_checking = false;
+                // Asked from Settings: the answer goes there if it is still open.
+                let say = |app: &Self, text: String| if app.settings.is_some() { app.settings_toast(&text) } else { show_alert(text) };
+                match r {
+                    Ok(Some(tag)) => self.pending_update = Some(tag),
+                    Ok(None) => say(self, format!("PoodPim {} เป็นเวอร์ชันล่าสุดแล้ว", update::CURRENT)),
+                    Err(e) => say(self, format!("เช็คอัปเดตไม่ได้: {e}")),
+                }
+            }
             UserEvent::UpdateAnswer(tag, yes) => {
                 self.dialog_open = false;
                 if !yes {
@@ -1078,7 +1103,10 @@ impl App {
                         self.quit = true;
                     }
                     Err(e) => {
-                        platform::alert(&format!("ถอนการติดตั้งไม่สำเร็จทั้งหมด: {e:#}"));
+                        let message = format!("ถอนการติดตั้งไม่สำเร็จทั้งหมด: {e:#}");
+                        // Windows quits right after (what it removed included the app): wait for
+                        // the box there. macOS keeps running: not on the event loop.
+                        if cfg!(windows) { platform::alert(&message) } else { show_alert(message) }
                         // Windows has removed what it could, the app included: don't keep running.
                         self.quit = cfg!(windows);
                     }
@@ -1154,6 +1182,14 @@ impl App {
                 }
                 Err(e) => eprintln!("int8 decoder: {e} (keeping the fp32 one)"),
             },
+            UserEvent::FileGoAhead(go) => {
+                // A recording may have started while the notice was up: then no picker.
+                if go && self.state == State::Idle {
+                    self.open_file_picker(); // dialog_open stays set until FileChosen
+                } else {
+                    self.dialog_open = false;
+                }
+            }
             UserEvent::FileChosen(path) => {
                 self.dialog_open = false;
                 if let Some(path) = path {
@@ -1252,11 +1288,7 @@ impl App {
             } else {
                 "แก้คำ (1/2): ลบข้อความให้เหลือแค่คำที่ PoodPim พิมพ์ผิด\nเช่น ฟีดแบ็ก หรือ depop\n(ได้ยินผิดหลายแบบ คั่นด้วยจุลภาค ,)"
             };
-            let answer = platform::ask_text(prompt, &transcript)
-            .and_then(|heard| {
-                let wanted = platform::ask_text(&format!("แก้คำ (2/2): ให้เขียน \"{heard}\" เป็นอะไร\nเช่น feedback หรือ DevOps"), "")?;
-                Some((heard, wanted))
-            });
+            let answer = platform::ask_text_then(prompt, &transcript, "แก้คำ (2/2): ให้เขียน \"", "\" เป็นอะไร\nเช่น feedback หรือ DevOps");
             let _ = p.send_event(UserEvent::CorrectionAnswer(answer));
         });
     }
@@ -1290,6 +1322,11 @@ impl App {
     }
 
     fn check_update(&mut self) {
+        if self.update_checking {
+            return;
+        }
+        self.update_checking = true;
+        self.settings_toast("กำลังตรวจหาอัปเดต…");
         let p = self.proxy.clone();
         std::thread::spawn(move || {
             let _ = p.send_event(UserEvent::UpdateChecked(update::check().map_err(|e| format!("{e:#}"))));
@@ -1450,6 +1487,12 @@ impl App {
                 } else if self.state == State::TranscribingFile {
                     eprintln!("talk key pressed while transcribing a file: nothing started");
                     self.overlay.set(Phase::FileBusy);
+                } else if self.state == State::Loading {
+                    // E.g. just after login: say so, instead of a key that seems dead.
+                    eprintln!("talk key pressed while the model is loading: nothing started");
+                    self.overlay.set(Phase::ModelLoading);
+                } else if self.state == State::Downloading {
+                    self.overlay.set(Phase::ModelDownloading);
                 }
             }
             HotkeyEvent::TalkUp => {
@@ -1556,17 +1599,26 @@ impl App {
             return;
         }
         self.dialog_open = true;
+        if self.cfg.backend != Backend::Lambda {
+            return self.open_file_picker();
+        }
         let p = self.proxy.clone();
-        let own_model = self.cfg.backend == Backend::Lambda;
         std::thread::spawn(move || {
-            let go = !own_model
-                || platform::confirm(
-                    "การถอดเสียงจากไฟล์ทำในเครื่องนี้ (ไฟล์ยาวส่งไปเซิร์ฟเวอร์ไม่ได้) PoodPim จะโหลดโมเดลถอดเสียงในเครื่อง \
-                     ซึ่งใช้หน่วยความจำเพิ่มราว 1 GB ระหว่างถอด แล้วคืนเมื่อเสร็จ\n\nเลือกไฟล์เลยไหม?",
-                    "เลือกไฟล์",
-                    "ยกเลิก",
-                );
-            let path = if go { platform::choose_file("เลือกไฟล์เสียงหรือวิดีโอที่จะถอดเสียง") } else { None };
+            let go = platform::confirm(
+                "การถอดเสียงจากไฟล์ทำในเครื่องนี้ (ไฟล์ยาวส่งไปเซิร์ฟเวอร์ไม่ได้) PoodPim จะโหลดโมเดลถอดเสียงในเครื่อง \
+                 ซึ่งใช้หน่วยความจำเพิ่มราว 1 GB ระหว่างถอด แล้วคืนเมื่อเสร็จ\n\nเลือกไฟล์เลยไหม?",
+                "เลือกไฟล์",
+                "ยกเลิก",
+            );
+            let _ = p.send_event(UserEvent::FileGoAhead(go));
+        });
+    }
+
+    /// The Open panel (macOS: on this thread, the main one; it returns at once). Its answer
+    /// comes back as FileChosen; `dialog_open` is set until then.
+    fn open_file_picker(&mut self) {
+        let p = self.proxy.clone();
+        platform::choose_file("เลือกไฟล์เสียงหรือวิดีโอที่จะถอดเสียง", move |path| {
             let _ = p.send_event(UserEvent::FileChosen(path));
         });
     }
@@ -1619,7 +1671,9 @@ impl App {
     /// Starts transcribing `src` into a text file next to it, on a thread of its own.
     fn start_file_job(&mut self, src: std::path::PathBuf) {
         if self.state != State::Idle {
-            return; // a recording started while the picker was open
+            // A recording started while the picker was open: say so rather than drop the file.
+            eprintln!("file picked while busy ({:?}): not started", self.state);
+            return show_alert("ยังเริ่มถอดเสียงจากไฟล์ไม่ได้ เพราะ PoodPim กำลังทำงานอื่นอยู่\n\nเสร็จแล้วเลือกไฟล์ใหม่อีกครั้งได้ที่เมนู 🎙 › Transcribe a file…".into());
         }
         let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         self.reload_vocabulary();
@@ -1910,7 +1964,7 @@ impl App {
         let (mixed, vocabulary) = (self.cfg.mixed_english, self.vocabulary.clone());
         std::thread::spawn(move || {
             let took = Instant::now();
-            let audio = resample(&raw, rate, SAMPLE_RATE);
+            let audio = resample_fast(&raw, rate, SAMPLE_RATE);
             // A finished part may have just been queued: it goes first. (Greedy decoding instead
             // of beam search saved only ~10% of the preview's CPU, and wrote the English words
             // in Thai letters, so the pill would show other words than the ones typed.)
@@ -1964,7 +2018,7 @@ impl App {
             (cuts, b.len())
         });
         for raw in cuts {
-            pipe.push(resample(&raw, rate, SAMPLE_RATE));
+            pipe.push(resample_fast(&raw, rate, SAMPLE_RATE));
         }
         let (done, sent) = pipe.progress();
         if sent > 0 {
@@ -1992,6 +2046,7 @@ impl App {
         if !platform::stop_listening() {
             return; // an Esc was taken from the keyboard and its event comes next: it cancels
         }
+        let t_finish = Instant::now();
         self.stop_at = None;
         let raw = self.recorder.stop_raw();
         let rate = self.recorder.rate();
@@ -2007,10 +2062,12 @@ impl App {
             return;
         };
         if seg.start() < raw.len() {
-            pipe.push(resample(&raw[seg.start()..], rate, SAMPLE_RATE));
+            pipe.push(resample_fast(&raw[seg.start()..], rate, SAMPLE_RATE));
         }
         self.state = State::Transcribing;
         self.overlay.set(Phase::Working);
+        // The event loop's share of release → text (stopping the microphone, the last part).
+        eprintln!("finish: {} ms on the event loop", t_finish.elapsed().as_millis());
         self.status_text = match self.cfg.backend {
             Backend::Local => "Transcribing…".into(),
             Backend::Lambda => "Transcribing on server…".into(),
@@ -2093,10 +2150,15 @@ impl App {
             return;
         }
         let p = self.proxy.clone();
+        let t = Instant::now();
         match crate::settings::SettingsWindow::open(target, move |m| {
             let _ = p.send_event(UserEvent::Settings(m));
         }) {
-            Ok(w) => self.settings = Some(w),
+            Ok(w) => {
+                // Built on the event loop (webview included): how long the app was held up.
+                eprintln!("settings window built in {} ms", t.elapsed().as_millis());
+                self.settings = Some(w);
+            }
             Err(e) => {
                 eprintln!("settings window: {e:#}");
                 show_alert(format!("เปิดหน้าตั้งค่าไม่ได้: {e:#}"));
@@ -2300,10 +2362,11 @@ impl App {
         if self.warm.as_ref().is_some_and(|w| w.is_finished()) && self.state != State::Recording {
             self.warm = None;
         }
-        if self.needs_permission {
-            ui.status.set_text("⚠ Allow PoodPim in Accessibility to use the talk key");
-        } else {
-            ui.status.set_text(&self.status_text);
+        let mut shown = ui.shown.borrow_mut();
+        let status = if self.needs_permission { "⚠ Allow PoodPim in Accessibility to use the talk key" } else { &self.status_text };
+        if shown.status != status {
+            shown.status = status.to_string();
+            ui.status.set_text(status);
         }
         let need_download = self.cfg.backend == Backend::Local
             && matches!(self.state, State::NeedsModel | State::Error)
@@ -2319,23 +2382,34 @@ impl App {
             let at = 9 + usize::from(ui.shown_permission.get());
             let _ = if need_download { ui.menu.insert(&ui.download, at) } else { ui.menu.remove(&ui.download) };
         }
-        ui.paste_last.set_enabled(!self.last_text.is_empty());
-        if self.state == State::TranscribingFile {
-            ui.transcribe_file.set_text(format!("Cancel transcribing {}", self.file_name.replace('&', "&&")));
-            ui.transcribe_file.set_enabled(self.file_cancel.as_ref().is_some_and(|c| !c.load(std::sync::atomic::Ordering::SeqCst)));
+        let paste_last = !self.last_text.is_empty();
+        if shown.paste_last != Some(paste_last) {
+            shown.paste_last = Some(paste_last);
+            ui.paste_last.set_enabled(paste_last);
+        }
+        let transcribe_file = if self.state == State::TranscribingFile {
+            let cancelling = self.file_cancel.as_ref().is_none_or(|c| c.load(std::sync::atomic::Ordering::SeqCst));
+            (format!("Cancel transcribing {}", self.file_name.replace('&', "&&")), !cancelling)
         } else {
-            ui.transcribe_file.set_text("Transcribe a file…");
-            ui.transcribe_file.set_enabled(self.state == State::Idle && !self.dialog_open);
+            ("Transcribe a file…".to_string(), self.state == State::Idle && !self.dialog_open)
+        };
+        if shown.transcribe_file.as_ref() != Some(&transcribe_file) {
+            ui.transcribe_file.set_text(&transcribe_file.0);
+            ui.transcribe_file.set_enabled(transcribe_file.1);
+            shown.transcribe_file = Some(transcribe_file);
         }
         if self.recent_dirty {
             self.recent_dirty = false;
             self.rebuild_recent(&ui.recent);
         }
-        let (icon, template) = icon_for(self.state);
-        #[cfg(target_os = "macos")]
-        let _ = if template { ui.tray.set_icon_templated(Some(icon)) } else { ui.tray.set_icon(Some(icon)) };
-        #[cfg(not(target_os = "macos"))]
-        let _ = (template, ui.tray.set_icon(Some(icon)));
+        if shown.icon != Some(self.state) {
+            shown.icon = Some(self.state);
+            let (icon, template) = icon_for(self.state);
+            #[cfg(target_os = "macos")]
+            let _ = if template { ui.tray.set_icon_templated(Some(icon)) } else { ui.tray.set_icon(Some(icon)) };
+            #[cfg(not(target_os = "macos"))]
+            let _ = (template, ui.tray.set_icon(Some(icon)));
+        }
     }
 }
 
